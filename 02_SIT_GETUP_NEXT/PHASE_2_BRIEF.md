@@ -20,11 +20,10 @@ expected to map literally to K1 proportions, limits, contacts, or strength.
 
 ### Source video
 
-- `source_video/lying_down_standing_up.mov` — metadata-stripped, video-only
-  copy of the original human reference. GPS, device, capture-time, metadata
-  tracks, and audio were removed; the encoded H.264 visual stream is
-  unchanged.
-- `source_video/lying_down_standing_up_720x1280.mp4` — normalized input.
+- `source_video/lying_down_standing_up.mov` — human reference clip for the
+  desired sequence.
+- `source_video/lying_down_standing_up_720x1280.mp4` — normalized processing
+  input.
 
 ### GVHMR example
 
@@ -34,8 +33,7 @@ expected to map literally to K1 proportions, limits, contacts, or strength.
 ### K1 retarget example
 
 - `retarget_example/k1_retarget_side_preview.mp4` — side-view K1 retarget.
-- `retarget_example/k1_sit_getup_reference_50fps.csv` — accepted
-  soft-envelope CSV.
+- `retarget_example/k1_sit_getup_reference_50fps.csv` — initial retarget CSV.
 - `retarget_example/k1_sit_getup_reference_50fps.npz` — converted 50 Hz K1
   reference.
 - `retarget_example/k1_retarget_contact_sheet.jpg` — quick visual summary.
@@ -45,13 +43,16 @@ expected to map literally to K1 proportions, limits, contacts, or strength.
 These files show our direction and prior work. We expect the motion,
 contacts, rewards, and policy to be revised substantially.
 
-The source and derived previews visibly identify the human performer and the
-recording interior. Share them only with the performer's consent. See
-[`../SHARE_SECURITY_REVIEW.md`](../SHARE_SECURITY_REVIEW.md).
-
 ## Main issue observed so far
 
 Our first retarget/training attempts crouched but did not reliably transition
 onto the butt. The motion tended to tip forward rather than establish hand
 support behind the body. This is why the desired contact sequence is stated
 explicitly above.
+
+## Phase 2 collaboration target
+
+After the squat workflow is complete, reuse its task structure, evaluation,
+export, and deployment path where practical. The sit/get-up task will need a
+new contact strategy, reference treatment, rewards, and likely a staged
+curriculum.

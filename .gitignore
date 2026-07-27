@@ -1,17 +1,8 @@
-# Credentials and local configuration
+# Local environments and configuration
 .env
 .env.*
-!.env.example
-*.pem
-*.key
-*.p12
-*.pfx
-id_rsa*
-id_ed25519*
-credentials*
-secrets*
 
-# Local caches and generated files
+# Caches and operating-system files
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -20,6 +11,5 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Do not commit hand-built archives or private sanitization work
+# Generated archives
 *.zip
-PRIVATE_*

@@ -4,14 +4,13 @@
    Geek/Qualcomm?
 2. Can we begin from your existing learned-motion task and K1 deployment
    workflow?
-3. What squat reference format would you prefer, and should we revise the
-   provided procedural reference or create a new reference?
-4. What should count as a successful squat in simulation before deployment?
-5. What is your preferred PREP/WALK/CUSTOM handoff and command-publication
-   sequence for our firmware?
-6. What firmware-side evidence will confirm that a physical command was
-   actually accepted?
-7. Which files and instructions will live in the shared repository after the
-   first working session?
-8. Once the squat works, which pieces of the workflow can be reused directly
-   for the floor sit/get-up task?
+3. Should we revise the provided procedural squat reference or create a new
+   reference in your preferred format?
+4. What simulation results should we require before moving to the robot?
+5. What changes are needed to adapt your K1 Pro deployment path to the robot
+   we select?
+6. What is the safest first hardware-validation sequence?
+7. Which task files, checkpoints, exports, deployment tools, and instructions
+   should remain in this repository?
+8. Once the squat works, which parts can be reused for the floor sit/get-up
+   task?
