@@ -37,6 +37,8 @@ to it.
   desired floor sit/get-up motion and reference material.
 - [`03_ROBOT_AND_DEPLOYMENT_CONTEXT/README.md`](03_ROBOT_AND_DEPLOYMENT_CONTEXT/README.md) —
   robot variants, supplied model, and deployment context.
+- [`03_ROBOT_AND_DEPLOYMENT_CONTEXT/arena_patrol_example/`](03_ROBOT_AND_DEPLOYMENT_CONTEXT/arena_patrol_example/) —
+  minimal tracked-arena walking, calibration, bounds, and head-command example.
 - [`KICKOFF_QUESTIONS.md`](KICKOFF_QUESTIONS.md) — decisions for the first
   working session.
 

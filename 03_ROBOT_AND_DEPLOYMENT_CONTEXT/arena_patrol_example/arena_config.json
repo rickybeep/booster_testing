@@ -1,0 +1,38 @@
+{
+  "arena_m": [0.0, 0.0, 5.4864, 5.4864],
+  "anchors_m": [
+    [0.0, 0.0],
+    [0.0, 5.4864],
+    [5.4864, 5.4864],
+    [5.4864, 0.0]
+  ],
+  "anchor_to_tag_vertical_offset_m": 0.2286,
+  "tag_id": 1,
+  "tag_forward_offset_m": 0.2032,
+  "perimeter_stop_m": 0.5,
+  "safe_margin_m": 1.5,
+  "waypoints_m": [
+    [1.75, 1.75],
+    [3.7364, 1.75],
+    [3.7364, 3.7364],
+    [1.75, 3.7364]
+  ],
+  "arrival_radius_m": 0.45,
+  "slow_radius_m": 0.8,
+  "max_forward_m_s": 0.2,
+  "max_turn_rad_s": 0.4,
+  "recovery_forward_m_s": 0.12,
+  "turn_kp": 1.4,
+  "forward_cone_deg": 80.0,
+  "control_hz": 20.0,
+  "uwb_stale_s": 0.6,
+  "nav_stale_s": 0.65,
+  "status_stale_s": 1.25,
+  "trusted_anchor_count": 4,
+  "max_uwb_residual_m": 0.5,
+  "calibration_distance_m": 0.8,
+  "calibration_speed_m_s": 0.2,
+  "calibration_timeout_s": 14.0,
+  "imu_yaw_sign": 1,
+  "sdk_yaw_sign": 1
+}
