@@ -1,0 +1,46 @@
+[workspace]
+name = "booster-deploy"
+version = "0.2.0"
+description = "Stateful squat policy deployment for Booster K1"
+authors = ["Team whIRLwind"]
+channels = [
+    "https://prefix.dev/conda-forge",
+    "https://prefix.dev/robostack-humble",
+]
+platforms = [
+    { platform = "linux-64", glibc = "2.35" },
+    { platform = "linux-aarch64", glibc = "2.35" },
+]
+
+[dependencies]
+python = ">=3.11,<3.12"
+numpy = ">=1.26,<3"
+pytorch = ">=2.5,<3"
+mujoco = ">=3.3,<4"
+onnxruntime = ">=1.20,<2"
+ruff = ">=0.12,<1"
+
+[pypi-dependencies]
+booster-sdk = "==0.1.2-alpha.2"
+
+[environments]
+ros = ["ros"]
+
+[tasks]
+deploy-mujoco = "python scripts/deploy.py --mujoco"
+list-tasks = "python scripts/deploy.py --list"
+lint = "ruff check --select E4,E7,E9,F ."
+
+[feature.ros.dependencies]
+compilers = "*"
+cmake = "*"
+make = "*"
+ninja = "*"
+pkg-config = "*"
+colcon-common-extensions = ">=0.3"
+setuptools = ">=75,<76"
+ros-humble-desktop = "==0.10.0"
+
+[feature.ros.tasks]
+ros-build = "cd ros2_ws && CMAKE_BUILD_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN) MAKEFLAGS=-j$(getconf _NPROCESSORS_ONLN) colcon build --symlink-install --merge-install --parallel-workers $(getconf _NPROCESSORS_ONLN) --cmake-args -DPython_FIND_VIRTUALENV=ONLY -DPython3_FIND_VIRTUALENV=ONLY"
+deploy = { cmd = "./scripts/ros-env.sh python scripts/deploy.py", depends-on = ["ros-build"] }

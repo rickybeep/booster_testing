@@ -1,0 +1,18 @@
+# Task-specific models and data (stored per robot/task)
+tasks/*/models/
+tasks/*/motions/
+!tasks/squat/models/
+!tasks/squat/models/squat.onnx
+
+.DS_Store
+
+# Local ROS workspace build products
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Common Python temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

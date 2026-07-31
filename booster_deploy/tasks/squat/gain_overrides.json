@@ -1,0 +1,8 @@
+{
+  "damping": {
+    "Left_Ankle_Pitch": 2.0,
+    "Left_Ankle_Roll": 2.0,
+    "Right_Ankle_Pitch": 2.0,
+    "Right_Ankle_Roll": 2.0
+  }
+}
