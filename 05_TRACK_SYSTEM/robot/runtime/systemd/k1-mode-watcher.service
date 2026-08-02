@@ -1,0 +1,26 @@
+[Unit]
+Description=BOOSTER TRACK V10 K1 mode watcher
+Requires=k1-motion-guard.service
+After=k1-motion-guard.service network.target
+StartLimitIntervalSec=30s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=booster
+Group=booster
+WorkingDirectory=/opt/booster-track-v10/current/robot_runtime
+EnvironmentFile=/etc/booster-track-v10/runtime.env
+Environment=K1_TRACK_RUNTIME_DIR=/run/booster-track-v10
+UMask=0027
+ExecStartPre=/usr/bin/test -x ${K1_PYTHON}
+ExecStartPre=/usr/bin/test -r ${ROS_SETUP}
+ExecStartPre=/usr/bin/test -r ${BOOSTER_ROS_SETUP}
+# Vendor setup scripts may dereference unset optional variables.
+ExecStart=/bin/bash -c 'set -eo pipefail; source "$ROS_SETUP"; source "$BOOSTER_ROS_SETUP"; exec "$K1_PYTHON" k1_mode_watcher.py'
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=k1-panel-v10.target

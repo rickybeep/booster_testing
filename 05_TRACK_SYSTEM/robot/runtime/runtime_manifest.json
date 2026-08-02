@@ -1,0 +1,29 @@
+{
+  "track_version": "V10-partner-candidate",
+  "protocol": 1,
+  "status": "offline_review_only_not_deployed",
+  "release_layout": "/opt/booster-track-v10/releases/<sha256>/robot_runtime",
+  "current_symlink": "/opt/booster-track-v10/current",
+  "socket": "/run/booster-track-v10/motion-guard.sock",
+  "guard_status": "/run/booster-track-v10/motion-guard-status.json",
+  "mode_status": "/run/booster-track-v10/mode.json",
+  "nav_status": "/run/booster-track-v10/nav.json",
+  "telemetry_status": "/run/booster-track-v10/telemetry.json",
+  "files": [
+    "__init__.py",
+    "k1_control_server.py",
+    "k1_guard_protocol.py",
+    "k1_mode_watcher.py",
+    "k1_motion_guard.py",
+    "k1_motion_zero_once.py",
+    "k1_runtime_health.py",
+    "k1_telemetry_daemon.py",
+    "runtime.env.example",
+    "runtime_manifest.json",
+    "systemd/k1-control-server.service",
+    "systemd/k1-mode-watcher.service",
+    "systemd/k1-motion-guard.service",
+    "systemd/k1-panel-v10.target",
+    "systemd/k1-telemetry.service"
+  ]
+}

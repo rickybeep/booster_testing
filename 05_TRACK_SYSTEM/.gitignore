@@ -1,0 +1,52 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+secrets/
+*_API_KEY.txt
+*_PASSWORD.txt
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+known_hosts
+credentials*.json
+secrets*.json
+config/local/
+config/*.json
+!config/tracker.example.json
+config/*token*.txt
+config/*.token
+robot/runtime/*.env
+
+# Runtime state and diagnostics
+logs/
+**/logs/
+captures/
+**/captures/
+lockin/
+**/lockin/
+*.log
+*.jsonl
+*.port
+*.pid
+backend_crash*
+battery_runtime_log.txt
+booster_settings_*.json
+
+# Python/test caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.pixi/
+
+# Generated archives and operating-system files
+*.zip
+Thumbs.db
+.DS_Store
