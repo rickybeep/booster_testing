@@ -1,0 +1,4 @@
+# Preserve the reviewed package bytes so SHA256SUMS.txt remains portable.
+# Some copied V10 sources retain CRLF; treat CR as part of that line ending.
+* -text whitespace=cr-at-eol
+**/* -text whitespace=cr-at-eol

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "live_motion_enabled": false,
+  "uwb": {
+    "port": "AUTO",
+    "baud": 115200,
+    "allow_unverified_lo": false,
+    "anchors_m": [[0.0, 0.0], [0.0, 5.4864], [5.4864, 5.4864], [5.4864, 0.0]],
+    "anchor_to_tag_height_m": 0.2286,
+    "position_stale_s": 0.6,
+    "minimum_anchors": 4,
+    "maximum_residual_m": 0.5
+  },
+  "arena": {
+    "bounds_m": [0.0, 0.0, 5.4864, 5.4864],
+    "safe_margin_m": 1.5,
+    "static_keepouts": [
+      {
+        "label": "example_center_keepout",
+        "center_m": [2.7432, 2.7432],
+        "radius_m": 0.1
+      }
+    ]
+  },
+  "navigation": {
+    "control_hz": 20,
+    "dwell_s": 5.0,
+    "waypoint_radius_m": 0.5,
+    "max_forward_mps": 0.2,
+    "max_turn_rad_s": 0.4,
+    "head_scan_yaw_rad": [-0.55, 0.0, 0.55, 0.0],
+    "head_scan_interval_s": 1.25
+  },
+  "robots": [
+    {
+      "name": "education_k1_example",
+      "enabled": false,
+      "hardware_variant": "education_jetson",
+      "panel_hosts": ["192.0.2.10"],
+      "panel_port": 8080,
+      "auth_token_file": "education-control-token.local.txt",
+      "uwb_tag": 1,
+      "keepout_radius_m": 0.75,
+      "nav_yaw_stale_s": 0.65,
+      "imu_yaw_sign": 1,
+      "imu_yaw_offset_deg": 0.0,
+      "tag_offset_m": {"forward": 0.0, "left": 0.0},
+      "waypoints_m": [[1.8, 1.8], [3.65, 1.8], [3.65, 3.65], [1.8, 3.65]]
+    },
+    {
+      "name": "geek_k1_example",
+      "enabled": false,
+      "hardware_variant": "geek_qualcomm_qrb5165",
+      "panel_hosts": ["192.0.2.11"],
+      "panel_port": 8080,
+      "auth_token_file": "geek-control-token.local.txt",
+      "uwb_tag": 2,
+      "keepout_radius_m": 0.75,
+      "nav_yaw_stale_s": 1.25,
+      "imu_yaw_sign": 1,
+      "imu_yaw_offset_deg": 0.0,
+      "tag_offset_m": {"forward": 0.0, "left": 0.0},
+      "waypoints_m": [[1.8, 3.65], [3.65, 3.65], [3.65, 1.8], [1.8, 1.8]]
+    }
+  ]
+}

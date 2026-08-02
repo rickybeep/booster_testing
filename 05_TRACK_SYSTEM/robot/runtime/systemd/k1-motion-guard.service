@@ -1,0 +1,26 @@
+[Unit]
+Description=BOOSTER TRACK V10 independent K1 motion guard
+After=network.target
+StartLimitIntervalSec=30s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=booster
+Group=booster
+WorkingDirectory=/opt/booster-track-v10/current/robot_runtime
+EnvironmentFile=/etc/booster-track-v10/runtime.env
+Environment=K1_TRACK_RUNTIME_DIR=/run/booster-track-v10
+RuntimeDirectory=booster-track-v10
+RuntimeDirectoryMode=0750
+UMask=0027
+ExecStartPre=/usr/bin/test -x ${K1_PYTHON}
+ExecStart=/usr/bin/env ${K1_PYTHON} /opt/booster-track-v10/current/robot_runtime/k1_motion_guard.py
+ExecStopPost=/usr/bin/env ${K1_PYTHON} /opt/booster-track-v10/current/robot_runtime/k1_motion_zero_once.py
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=5s
+NoNewPrivileges=true
+
+[Install]
+WantedBy=k1-panel-v10.target

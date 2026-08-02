@@ -1,0 +1,10 @@
+[Unit]
+Description=BOOSTER TRACK V10 robot runtime
+Requires=k1-motion-guard.service k1-control-server.service
+# Telemetry/mode are read-only helpers: wanted, never required, so a
+# helper fault can never take down motion supervision.
+Wants=k1-telemetry.service k1-mode-watcher.service
+After=k1-motion-guard.service k1-control-server.service
+After=k1-telemetry.service k1-mode-watcher.service
+# Deliberately no [Install] section: this candidate is started manually and
+# cannot be enabled into the boot target or used as an isolation target.
