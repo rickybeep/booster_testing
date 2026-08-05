@@ -76,6 +76,8 @@ class BoosterRobotPortal:
         self.squat_started_event = mp.Event()
         self.standing_reference_event = mp.Event()
         self.low_state_ready_event = mp.Event()
+        self.squat_policy_state = mp.Array("q", (0, 0, 1))
+        self._last_standing_log_time = 0.0
         self.is_running = True
         self.timer = CountTimer(
             self.cfg.booster.low_state_dt, use_sim_time=use_sim_time)
@@ -379,6 +381,76 @@ class BoosterRobotPortal:
             <= self.cfg.booster.standing_joint_velocity_tolerance
         )
 
+    def log_standing_progress(
+        self, stable_ticks: int, required_stable_ticks: int
+    ) -> None:
+        """Log the standing gate once per second while a stand is pending."""
+        now = time.monotonic()
+        if now - self._last_standing_log_time < 1.0:
+            return
+        self._last_standing_log_time = now
+
+        with self.squat_policy_state.get_lock():
+            policy_state = tuple(self.squat_policy_state[:])
+        process_alive = bool(
+            self.inference_process is not None
+            and self.inference_process.is_alive()
+        )
+
+        if not self.low_state_ready_event.is_set():
+            self.logger.info(
+                "Standing gate: mode=%s squat_enabled=%s policy_alive=%s "
+                "started=%s reference_complete=%s onnx_state=%s "
+                "low_state=missing stable=%d/%d",
+                self.current_mode,
+                self.remoteControlService.get_squat_enabled(),
+                process_alive,
+                self.squat_started_event.is_set(),
+                self.standing_reference_event.is_set(),
+                policy_state,
+                stable_ticks,
+                required_stable_ticks,
+            )
+            return
+
+        state = self.synced_state.read()[0]
+        position_errors = np.abs(
+            state["joint_pos"]
+            - np.asarray(self.cfg.robot.default_joint_pos, dtype=np.float32)
+        )
+        velocities = np.abs(state["joint_vel"])
+        position_index = int(np.argmax(position_errors))
+        velocity_index = int(np.argmax(velocities))
+        position_error = float(position_errors[position_index])
+        max_velocity = float(velocities[velocity_index])
+        position_ok = position_error <= self.cfg.booster.standing_joint_tolerance
+        velocity_ok = (
+            max_velocity <= self.cfg.booster.standing_joint_velocity_tolerance
+        )
+        self.logger.info(
+            "Standing gate: mode=%s squat_enabled=%s policy_alive=%s "
+            "started=%s reference_complete=%s onnx_state=%s "
+            "position_ok=%s worst_position=%s:%.3frad(limit=%.3f) "
+            "velocity_ok=%s worst_velocity=%s:%.3frad/s(limit=%.3f) "
+            "stable=%d/%d",
+            self.current_mode,
+            self.remoteControlService.get_squat_enabled(),
+            process_alive,
+            self.squat_started_event.is_set(),
+            self.standing_reference_event.is_set(),
+            policy_state,
+            position_ok,
+            self.cfg.robot.joint_names[position_index],
+            position_error,
+            self.cfg.booster.standing_joint_tolerance,
+            velocity_ok,
+            self.cfg.robot.joint_names[velocity_index],
+            max_velocity,
+            self.cfg.booster.standing_joint_velocity_tolerance,
+            stable_ticks,
+            required_stable_ticks,
+        )
+
     def consume_crouch_request(self) -> bool:
         return self.remoteControlService.consume_crouch_request()
 
@@ -581,6 +653,14 @@ class BoosterRobotController(BaseController):
             self.update_squat_command()
             self.portal.metrics["policy_step"].mark()
             dof_targets = self.policy_step()
+            policy_state = getattr(self.policy, "squat_state", None)
+            if policy_state is not None:
+                flattened_state = np.asarray(policy_state).reshape(-1)
+                if flattened_state.shape == (3,):
+                    with self.portal.squat_policy_state.get_lock():
+                        self.portal.squat_policy_state[:] = [
+                            int(value) for value in flattened_state
+                        ]
             is_standing = bool(
                 getattr(self.policy, "is_standing_reference", lambda: False)()
             )

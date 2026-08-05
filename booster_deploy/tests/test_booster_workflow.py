@@ -23,6 +23,7 @@ class FakeContext:
         self.measured_standing = False
         self.calls: list[str] = []
         self.policy_started = False
+        self.progress: list[tuple[int, int]] = []
 
     def discard_crouch_request(self) -> None:
         self.requests = 0
@@ -58,6 +59,11 @@ class FakeContext:
 
     def robot_is_standing(self) -> bool:
         return self.measured_standing
+
+    def log_standing_progress(
+        self, stable_ticks: int, required_stable_ticks: int
+    ) -> None:
+        self.progress.append((stable_ticks, required_stable_ticks))
 
     def finish_squat(self) -> None:
         self.calls.append("walk")
@@ -105,6 +111,7 @@ class SquatWorkflowTest(unittest.TestCase):
         self.context.requests = 1
         self.tick()
         self.assertEqual(self.context.calls[-1], "stand")
+        self.assertEqual(self.context.progress[-1], (0, 3))
 
         self.context.measured_standing = True
         self.tick(5)
@@ -112,6 +119,7 @@ class SquatWorkflowTest(unittest.TestCase):
 
         self.context.reference_complete = True
         self.tick(2)
+        self.assertEqual(self.context.progress[-1], (2, 3))
         self.assertNotIn("walk", self.context.calls)
         self.tick()
         self.assertEqual(self.context.calls[-1], "walk")

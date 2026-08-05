@@ -26,6 +26,10 @@ class SquatWorkflowContext(Protocol):
 
     def robot_is_standing(self) -> bool: ...
 
+    def log_standing_progress(
+        self, stable_ticks: int, required_stable_ticks: int
+    ) -> None: ...
+
     def finish_squat(self) -> None: ...
 
     def cancel_squat(self) -> None: ...
@@ -99,19 +103,30 @@ class _RunSquatUntilStanding(py_trees.behaviour.Behaviour):
     def update(self) -> py_trees.common.Status:
         if self.context.current_mode != self.custom:
             self.stable_ticks = 0
+            if self.stand_requested:
+                self.context.log_standing_progress(
+                    self.stable_ticks, self.required_stable_ticks
+                )
             return py_trees.common.Status.RUNNING
 
         if self.context.consume_crouch_request():
             self.context.request_stand()
             self.stand_requested = True
 
+        started = self.context.squat_has_started()
+        reference_complete = self.context.standing_reference_complete()
+        robot_standing = self.context.robot_is_standing()
         complete = (
             self.stand_requested
-            and self.context.squat_has_started()
-            and self.context.standing_reference_complete()
-            and self.context.robot_is_standing()
+            and started
+            and reference_complete
+            and robot_standing
         )
         self.stable_ticks = self.stable_ticks + 1 if complete else 0
+        if self.stand_requested:
+            self.context.log_standing_progress(
+                self.stable_ticks, self.required_stable_ticks
+            )
         if self.stable_ticks >= self.required_stable_ticks:
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.RUNNING
