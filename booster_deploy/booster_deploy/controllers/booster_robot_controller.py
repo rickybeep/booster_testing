@@ -18,6 +18,7 @@ from booster_sdk.client.booster import BoosterClient, RobotMode
 
 from .controller_cfg import ControllerCfg
 from .base_controller import BaseController, BoosterRobot
+from .booster_workflow import create_squat_workflow
 from ..utils.synced_array import SyncedArray
 from ..utils.metrics import SyncedMetrics
 from ..utils.isaaclab import math as lab_math
@@ -64,12 +65,17 @@ class BoosterRobotPortal:
         self.logger = logging.getLogger(__name__)
 
         self.remoteControlService = RemoteControlService(
-            controller_available=True
+            controller_available=True,
+            workflow_controls=True,
         )
         self.remoteControlService.print_controls(real_robot=True)
         # Use multiprocessing.Event for inter-process communication
         self.exit_event = mp.Event()
         self.inference_ready_event = mp.Event()
+        self.policy_stop_event = mp.Event()
+        self.squat_started_event = mp.Event()
+        self.standing_reference_event = mp.Event()
+        self.low_state_ready_event = mp.Event()
         self.is_running = True
         self.timer = CountTimer(
             self.cfg.booster.low_state_dt, use_sim_time=use_sim_time)
@@ -95,6 +101,13 @@ class BoosterRobotPortal:
         # Initialize communication. Callbacks may start immediately and
         # reference `is_running` and `exit_event`, so ensure those are set.
         self._init_communication()
+        self.current_mode = RobotMode.UNKNOWN
+        self.workflow = create_squat_workflow(
+            self,
+            walking_mode=RobotMode.WALKING,
+            custom_mode=RobotMode.CUSTOM,
+            standing_stable_ticks=self.cfg.booster.standing_stable_ticks,
+        )
 
     def _init_synced_buffer(self):
         action_dtype = np.dtype(
@@ -255,6 +268,7 @@ class BoosterRobotPortal:
             self._state_buf[0]["joint_vel"][:] = dof_vel
             self._state_buf[0]["feedback_torque"][:] = fb_torque
             self.synced_state.write(self._state_buf)
+            self.low_state_ready_event.set()
 
             # Publish the latched operator command to the inference process.
             cmd = np.zeros((1,), dtype=self.synced_command.dtype)
@@ -299,30 +313,17 @@ class BoosterRobotPortal:
 
         return publisher
 
-    def start_custom_mode_conditionally(self):
-        print(f"{self.remoteControlService.get_custom_mode_operation_hint()}")
-        while not self.exit_event.is_set():
-            if self.remoteControlService.start_custom_mode():
-                break
-            time.sleep(0.1)
-
-        if self.exit_event.is_set():
+    def begin_squat(self) -> bool:
+        """Start policy publication while firmware is still in walking mode."""
+        if not self.low_state_ready_event.is_set():
             return False
-
-        while rclpy.ok() and self.low_cmd_publisher.get_subscription_count() == 0:
-            self.logger.info("Waiting for '/joint_ctrl' subscriber, retry in 0.5s")
-            time.sleep(0.5)
-
-        # Inference is already publishing policy commands. They take effect as
-        # soon as the firmware enters custom mode.
-        self.logger.info("Subscriber found, entering custom mode")
-        self.client.change_mode(RobotMode.CUSTOM)
-        self.logger.info("Custom mode started with policy control")
-        return True
-
-    def start_inference(self) -> bool:
-        """Start inference and wait until the policy is initialized."""
-        # start inference process (separate process)
+        if self.inference_process is not None and self.inference_process.is_alive():
+            return True
+        self.inference_ready_event.clear()
+        self.policy_stop_event.clear()
+        self.squat_started_event.clear()
+        self.standing_reference_event.clear()
+        self.remoteControlService.set_squat_enabled(True)
         self.inference_process = mp.Process(
             target=BoosterRobotPortal.inference_process_func,
             args=(
@@ -332,25 +333,81 @@ class BoosterRobotPortal:
             daemon=True,
         )
         self.inference_process.start()
-        self.logger.info("Inference process starting")
+        self.logger.info("Crouch requested in walking mode; policy starting")
+        return True
 
-        while not self.exit_event.is_set():
-            if self.inference_ready_event.wait(timeout=0.1):
-                self.logger.info("Inference process ready")
-                return True
-            if not self.inference_process.is_alive():
-                self.logger.error(
-                    "Inference process died during initialization"
-                )
-                self.exit_event.set()
-                return False
+    def policy_is_ready(self) -> bool:
+        process = self.inference_process
+        if process is not None and not process.is_alive():
+            self.logger.error("Inference process died during initialization")
+            self.exit_event.set()
+            return False
+        return (
+            self.inference_ready_event.is_set()
+            and self.low_cmd_publisher.get_subscription_count() > 0
+        )
 
-        return False
+    def enter_custom_mode(self) -> None:
+        self.logger.info("Policy ready; entering custom mode")
+        self.client.change_mode(RobotMode.CUSTOM)
+        self.current_mode = RobotMode.CUSTOM
 
-    def arm_policy_controls(self) -> None:
-        """Enable operator controls after custom mode accepts policy commands."""
-        self.remoteControlService.arm_squat_toggle()
-        print(f"{self.remoteControlService.get_operation_hint()}")
+    def request_stand(self) -> None:
+        self.remoteControlService.set_squat_enabled(False)
+        self.logger.info("Stand requested; waiting for policy and robot completion")
+
+    def squat_has_started(self) -> bool:
+        return self.squat_started_event.is_set()
+
+    def standing_reference_complete(self) -> bool:
+        return self.standing_reference_event.is_set()
+
+    def robot_is_standing(self) -> bool:
+        if not self.low_state_ready_event.is_set():
+            return False
+        state = self.synced_state.read()[0]
+        position_error = np.max(
+            np.abs(
+                state["joint_pos"]
+                - np.asarray(self.cfg.robot.default_joint_pos, dtype=np.float32)
+            )
+        )
+        max_velocity = np.max(np.abs(state["joint_vel"]))
+        return bool(
+            position_error <= self.cfg.booster.standing_joint_tolerance
+            and max_velocity
+            <= self.cfg.booster.standing_joint_velocity_tolerance
+        )
+
+    def consume_crouch_request(self) -> bool:
+        return self.remoteControlService.consume_crouch_request()
+
+    def discard_crouch_request(self) -> None:
+        self.remoteControlService.discard_crouch_requests()
+
+    def _stop_inference(self) -> None:
+        process = self.inference_process
+        if process is None:
+            return
+        self.policy_stop_event.set()
+        if process.is_alive():
+            process.join(timeout=2.0)
+        if process.is_alive():
+            self.logger.warning("Inference process did not stop, terminating")
+            process.terminate()
+            process.join(timeout=1.0)
+        self.inference_process = None
+
+    def finish_squat(self) -> None:
+        self.logger.info("Robot is fully standing; returning to walking mode")
+        self.client.change_mode(RobotMode.WALKING)
+        self.current_mode = RobotMode.WALKING
+        self.remoteControlService.set_squat_enabled(False)
+        self._stop_inference()
+
+    def cancel_squat(self) -> None:
+        self.remoteControlService.set_squat_enabled(False)
+        self._stop_inference()
 
     def cleanup(self) -> None:
         """Clean up resources (idempotent)."""
@@ -363,6 +420,7 @@ class BoosterRobotPortal:
         # stop threads and processes
         self.is_running = False
         self.exit_event.set()
+        self.policy_stop_event.set()
 
         # wait for inference process
         if (
@@ -416,34 +474,23 @@ class BoosterRobotPortal:
             )
 
     def run(self):
-        """Main loop: monitor inference process and diagnostics (10Hz)."""
+        """Tick the mode-aware squat behaviour tree at 10 Hz."""
 
         print("Initialization complete.")
+        print(self.remoteControlService.get_operation_hint())
+        while self.is_running and not self.exit_event.is_set():
+            try:
+                response = self.client.get_mode()
+                self.current_mode = response.mode_enum() or RobotMode.UNKNOWN
+                self.workflow.tick()
+            except Exception:
+                self.logger.exception("Workflow tick failed")
+                self.exit_event.set()
+                break
+            time.sleep(0.1)
 
-        # Start policy inference before entering custom mode. Its low-level
-        # commands are ignored by the firmware until custom mode is selected.
-        if not self.start_inference():
-            print("Policy inference initialization failed.")
-        elif not self.start_custom_mode_conditionally():
-            print("Custom mode initialization cancelled.")
-        else:
-            self.arm_policy_controls()
-
-            # main loop: wait for exit signal
-            while self.is_running and not self.exit_event.is_set():
-                # check whether the inference process is alive
-                if self.inference_process is not None:
-                    inference_process_alive = self.inference_process.is_alive()
-                    if not inference_process_alive:
-                        self.logger.error("Inference process died unexpectedly")
-                        self.is_running = False
-                        self.exit_event.set()
-                        break
-                time.sleep(0.1)
-
-        # exit and switch to walking mode
-        self.logger.info("Exiting controller, switching to walking mode...")
-        self.client.change_mode(RobotMode.WALKING)
+        # Shutdown never changes the robot's high-level mode implicitly.
+        self.cancel_squat()
 
     def __enter__(self) -> BoosterRobotPortal:
         return self
@@ -523,6 +570,8 @@ class BoosterRobotController(BaseController):
         next_inference_time = self.portal.timer.get_time()
         first_command_published = False
         while self.is_running and not self.portal.exit_event.is_set():
+            if self.portal.policy_stop_event.is_set():
+                break
             if self.portal.timer.get_time() < next_inference_time:
                 time.sleep(0.0002)
                 continue
@@ -532,10 +581,22 @@ class BoosterRobotController(BaseController):
             self.update_squat_command()
             self.portal.metrics["policy_step"].mark()
             dof_targets = self.policy_step()
+            is_standing = bool(
+                getattr(self.policy, "is_standing_reference", lambda: False)()
+            )
+            if not is_standing:
+                self.portal.squat_started_event.set()
+                self.portal.standing_reference_event.clear()
+            elif (
+                self.portal.squat_started_event.is_set()
+                and not self.squat_enabled
+            ):
+                self.portal.standing_reference_event.set()
             self.ctrl_step(dof_targets)
             if not first_command_published:
                 # Custom mode is gated on a complete inference/publish cycle.
                 self.portal.inference_ready_event.set()
                 first_command_published = True
 
-        self.portal.exit_event.set()
+        if not self.portal.policy_stop_event.is_set():
+            self.portal.exit_event.set()

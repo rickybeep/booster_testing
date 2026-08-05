@@ -127,7 +127,10 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - pypi: https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/16/e4/51620cb660512fe2f01b93e43d772f09039fb944fda92ac775a4ede2ffbb/booster_sdk-0.1.2a2-cp311-cp311-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/61/99/afa1e1b93e953a878ba877243b8ab296e83e9d93b8259ca30d90bda9fc02/py_trees-2.5.0-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/7e/32/a7125fb28c4261a627f999d5fb4afff25b523800faed2c30979949d6facd/pydot-4.0.1-py3-none-any.whl
       p2:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/bzip2-1.0.8-h4777abc_9.conda
@@ -232,6 +235,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_extensions-4.16.0-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
+      - pypi: https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/61/99/afa1e1b93e953a878ba877243b8ab296e83e9d93b8259ca30d90bda9fc02/py_trees-2.5.0-py2.py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/7e/32/a7125fb28c4261a627f999d5fb4afff25b523800faed2c30979949d6facd/pydot-4.0.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d3/65/e12e60c1a0f916982615af376bda4d2a57519ef77dd82140f8c158ebaca7/booster_sdk-0.1.2a2-cp311-cp311-manylinux_2_28_aarch64.whl
   ros:
     channels:
@@ -973,6 +979,7 @@ environments:
       - conda: https://prefix.dev/robostack-humble/linux-64/ros-humble-zstd-vendor-0.15.14-np126py311hbc2a38a_13.conda
       - conda: https://prefix.dev/robostack-humble/linux-64/ros2-distro-mutex-0.7.0-humble_13.conda
       - pypi: https://files.pythonhosted.org/packages/16/e4/51620cb660512fe2f01b93e43d772f09039fb944fda92ac775a4ede2ffbb/booster_sdk-0.1.2a2-cp311-cp311-manylinux_2_28_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/61/99/afa1e1b93e953a878ba877243b8ab296e83e9d93b8259ca30d90bda9fc02/py_trees-2.5.0-py2.py3-none-any.whl
       p2:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/aiohttp-3.14.3-py311hf076524_0.conda
@@ -1698,6 +1705,7 @@ environments:
       - conda: https://prefix.dev/robostack-humble/linux-aarch64/ros-humble-yaml-cpp-vendor-8.0.2-np126py311hbdd918e_13.conda
       - conda: https://prefix.dev/robostack-humble/linux-aarch64/ros-humble-zstd-vendor-0.15.14-np126py311hbdd918e_13.conda
       - conda: https://prefix.dev/robostack-humble/linux-aarch64/ros2-distro-mutex-0.7.0-humble_13.conda
+      - pypi: https://files.pythonhosted.org/packages/61/99/afa1e1b93e953a878ba877243b8ab296e83e9d93b8259ca30d90bda9fc02/py_trees-2.5.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d3/65/e12e60c1a0f916982615af376bda4d2a57519ef77dd82140f8c158ebaca7/booster_sdk-0.1.2a2-cp311-cp311-manylinux_2_28_aarch64.whl
 packages:
 - conda: https://prefix.dev/conda-forge/linux-64/_openmp_mutex-4.5-7_kmp_llvm.conda
@@ -28120,11 +28128,44 @@ packages:
     - ros2-distro-mutex >=0.7.0,<0.8.0a0
   size: 2321
   timestamp: 1753307949132
+- pypi: https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl
+  name: pyparsing
+  version: 3.3.2
+  sha256: 850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d
+  requires_dist:
+  - railroad-diagrams ; extra == 'diagrams'
+  - jinja2 ; extra == 'diagrams'
+  requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/16/e4/51620cb660512fe2f01b93e43d772f09039fb944fda92ac775a4ede2ffbb/booster_sdk-0.1.2a2-cp311-cp311-manylinux_2_28_x86_64.whl
   name: booster-sdk
   version: 0.1.2a2
   sha256: a5900776c3ce4a7bb2b00fdb3e93dd3bc9cd744baa750a166fba2f2d1c706d5b
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/61/99/afa1e1b93e953a878ba877243b8ab296e83e9d93b8259ca30d90bda9fc02/py_trees-2.5.0-py2.py3-none-any.whl
+  name: py-trees
+  version: 2.5.0
+  sha256: dfba364075cbf4706623454daace2961162fa98c3f3d062bd5af5098aac17127
+  requires_dist:
+  - pydot>=1.4
+- pypi: https://files.pythonhosted.org/packages/7e/32/a7125fb28c4261a627f999d5fb4afff25b523800faed2c30979949d6facd/pydot-4.0.1-py3-none-any.whl
+  name: pydot
+  version: 4.0.1
+  sha256: 869c0efadd2708c0be1f916eb669f3d664ca684bc57ffb7ecc08e70d5e93fee6
+  requires_dist:
+  - pyparsing>=3.1.0
+  - ruff ; extra == 'lint'
+  - mypy ; extra == 'types'
+  - pydot[lint] ; extra == 'dev'
+  - pydot[types] ; extra == 'dev'
+  - chardet ; extra == 'dev'
+  - parameterized ; extra == 'dev'
+  - pydot[dev] ; extra == 'tests'
+  - tox ; extra == 'tests'
+  - pytest ; extra == 'tests'
+  - pytest-cov ; extra == 'tests'
+  - pytest-xdist[psutil] ; extra == 'tests'
+  - zest-releaser[recommended] ; extra == 'release'
+  requires_python: '>=3.8'
 - pypi: https://files.pythonhosted.org/packages/d3/65/e12e60c1a0f916982615af376bda4d2a57519ef77dd82140f8c158ebaca7/booster_sdk-0.1.2a2-cp311-cp311-manylinux_2_28_aarch64.whl
   name: booster-sdk
   version: 0.1.2a2

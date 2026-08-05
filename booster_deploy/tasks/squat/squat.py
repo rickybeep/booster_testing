@@ -327,6 +327,10 @@ class SquatPolicy(Policy):
         robot_targets[self.policy_to_robot] = torch.from_numpy(policy_targets)
         return robot_targets
 
+    def is_standing_reference(self) -> bool:
+        """Whether the ONNX trajectory state is back at its standing sentinel."""
+        return bool(np.array_equal(self.squat_state, [[0, 0, 1]]))
+
 
 @configclass
 class SquatPolicyCfg(PolicyCfg):
