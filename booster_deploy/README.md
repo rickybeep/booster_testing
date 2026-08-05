@@ -56,11 +56,26 @@ workspace and can be run on a development machine.
 Use `--webots` with `deploy` when the ROS topics are provided by Webots.
 
 On the real robot, controller input arrives on
-`/remote_controller_state`. Press controller A (or keyboard `x`) to enter
-custom mode. Policy inference is already running and publishing before custom
-mode is requested, so it takes control immediately with no prepare-pose
-key-frame transition. After startup, controller B or keyboard `s` toggles squat
-on and off. In MuJoCo, keyboard `s` toggles immediately.
+`/remote_controller_state`. Deployment runs a `py_trees` workflow that observes
+the current high-level robot mode. In PREP, DAMP, or an unknown mode it sends no
+joint commands and requests no mode changes. While in WALK, press controller B
+(or keyboard `s`) to start the policy and enter CUSTOM mode for a crouch. The
+policy publishes its standing command during the mode transition and begins
+the crouch trajectory only after the SDK confirms CUSTOM. Press the button
+again to stand. The workflow returns the firmware to WALK only after the
+ONNX trajectory reports its standing sentinel and measured joint velocities
+have remained below the configured settling tolerance for five workflow ticks.
+In MuJoCo, keyboard `s` retains the original immediate toggle behavior.
+
+The settling gate defaults to a maximum joint speed of `0.25` rad/s. This value
+and the five-tick settling window are configured by
+`BoosterRobotControllerCfg`.
+
+Policy inference runs in a replaceable worker process, but ROS publication
+remains in the parent process. Each new crouch clears the prior command,
+action-ready handshake, completion flags, and shared action buffer before
+starting a freshly reset policy worker. This keeps repeated crouches from
+reusing middleware or policy state from the previous cycle.
 
 MuJoCo initializes the robot directly from the model's embedded frame-zero
 root pose, orientation, and joint positions.

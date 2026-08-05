@@ -11,8 +11,14 @@ import tty
 class RemoteControlService:
     """Track the ROS controller and keyboard controls used by the squat task."""
 
-    def __init__(self, *, controller_available: bool = False):
+    def __init__(
+        self,
+        *,
+        controller_available: bool = False,
+        workflow_controls: bool = False,
+    ):
         self.controller_available = controller_available
+        self.workflow_controls = workflow_controls
         self._lock = threading.Lock()
         self._running = True
         self._custom_mode_requested = False
@@ -21,6 +27,7 @@ class RemoteControlService:
         self._suppress_toggle_until_release = False
         self._controller_a_pressed = False
         self._controller_b_pressed = False
+        self._crouch_requests = 0
         self._stdin_tty = False
         self._old_termios = None
         self.keyboard_runner = None
@@ -29,6 +36,13 @@ class RemoteControlService:
         atexit.register(self.close)
 
     def get_operation_hint(self) -> str:
+        if self.workflow_controls:
+            if self.controller_available:
+                return (
+                    "Press controller B or keyboard 's' to crouch/stand. "
+                    "Crouch is accepted only while walking."
+                )
+            return "Press keyboard 's' to crouch/stand while walking."
         if self.controller_available:
             return "Press controller B or keyboard 's' to toggle squat on/off."
         return "Press keyboard 's' to toggle squat on/off."
@@ -41,7 +55,12 @@ class RemoteControlService:
     def print_controls(self, *, real_robot: bool) -> None:
         """Print the controls available for the selected inputs."""
         if self.controller_available:
-            if real_robot:
+            if real_robot and self.workflow_controls:
+                controls = (
+                    "  Controller B / keyboard s  Crouch, then stand",
+                    "  PREP/DAMP                   No deployment action",
+                )
+            elif real_robot:
                 controls = (
                     "  Controller A / keyboard x  Enter custom mode and start policy",
                     "  Controller B / keyboard s  Toggle squat after policy startup",
@@ -74,8 +93,27 @@ class RemoteControlService:
         with self._lock:
             return self._squat_enabled
 
+    def consume_crouch_request(self) -> bool:
+        """Consume one workflow button edge, if one is pending."""
+        with self._lock:
+            if self._crouch_requests == 0:
+                return False
+            self._crouch_requests -= 1
+            return True
+
+    def discard_crouch_requests(self) -> None:
+        with self._lock:
+            self._crouch_requests = 0
+
+    def set_squat_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._squat_enabled = enabled
+
     def _toggle_squat(self) -> None:
         with self._lock:
+            if self.workflow_controls:
+                self._crouch_requests += 1
+                return
             if not self._toggle_armed:
                 return
             self._squat_enabled = not self._squat_enabled
@@ -103,13 +141,15 @@ class RemoteControlService:
                 self._suppress_toggle_until_release = False
             elif (
                 not self._controller_b_pressed
-                and self._toggle_armed
                 and not self._suppress_toggle_until_release
             ):
-                self._squat_enabled = not self._squat_enabled
-                squat_state = (
-                    "enabled" if self._squat_enabled else "disabled"
-                )
+                if self.workflow_controls:
+                    self._crouch_requests += 1
+                elif self._toggle_armed:
+                    self._squat_enabled = not self._squat_enabled
+                    squat_state = (
+                        "enabled" if self._squat_enabled else "disabled"
+                    )
 
             self._controller_a_pressed = a_pressed
             self._controller_b_pressed = b_pressed
