@@ -72,6 +72,7 @@ class BoosterRobotPortal:
         # Use multiprocessing.Event for inter-process communication
         self.exit_event = mp.Event()
         self.inference_ready_event = mp.Event()
+        self.command_published_event = mp.Event()
         self.policy_stop_event = mp.Event()
         self.squat_started_event = mp.Event()
         self.standing_reference_event = mp.Event()
@@ -95,7 +96,7 @@ class BoosterRobotPortal:
         self.inference_process = None  # Inference process reference
         self.low_cmd_publisher: rclpy.publisher.Publisher = None
         self.low_state_thread = None
-        self.low_cmd_process: mp.Process | None = None
+        self.low_cmd_thread = None
 
         rclpy.init()
         # Initialize communication. Callbacks may start immediately and
@@ -122,7 +123,7 @@ class BoosterRobotPortal:
             shape=(1,),
             dtype=action_dtype,
         )
-        self._action_buf = np.ndarray((1,), dtype=action_dtype)
+        self._action_buf = np.zeros((1,), dtype=action_dtype)
 
         state_dtype = np.dtype(
             [
@@ -170,6 +171,7 @@ class BoosterRobotPortal:
             self.client = BoosterClient()
             self.create_low_cmd_publisher("booster_deploy_low_cmd_pub")
             self._start_low_state_subscription()
+            self._start_low_cmd_publisher()
         except Exception as e:
             self.logger.error(f"Failed to initialize communication: {e}")
             raise
@@ -313,17 +315,48 @@ class BoosterRobotPortal:
 
         return publisher
 
+    def _start_low_cmd_publisher(self) -> None:
+        """Publish shared policy actions without forking ROS middleware."""
+        def publish_commands() -> None:
+            self.logger.info("Low command publisher started")
+            while self.is_running and not self.exit_event.is_set():
+                if not self.inference_ready_event.wait(timeout=0.1):
+                    continue
+                action = self.synced_action.read()[0]
+                for i in range(self.robot.num_joints):
+                    self.motor_cmd[i].q = float(action["dof_target"][i])
+                    self.motor_cmd[i].kp = float(action["stiffness"][i])
+                    self.motor_cmd[i].kd = float(action["damping"][i])
+                self.low_cmd_publisher.publish(self.low_cmd)
+                self.command_published_event.set()
+                time.sleep(self.cfg.policy_dt)
+            self.logger.info("Low command publisher stopped")
+
+        self.low_cmd_thread = threading.Thread(
+            target=publish_commands,
+            name="low_cmd_publisher",
+            daemon=True,
+        )
+        self.low_cmd_thread.start()
+
+    def _reset_crouch_cycle(self) -> None:
+        """Clear every cross-process value owned by the previous cycle."""
+        self._set_squat_command(False)
+        self.inference_ready_event.clear()
+        self.command_published_event.clear()
+        self.squat_started_event.clear()
+        self.standing_reference_event.clear()
+        self._action_buf.fill(0)
+        self.synced_action.write(self._action_buf)
+
     def begin_squat(self) -> bool:
         """Start by publishing the policy's safe standing command."""
         if not self.low_state_ready_event.is_set():
             return False
         if self.inference_process is not None and self.inference_process.is_alive():
             return True
-        self.inference_ready_event.clear()
+        self._reset_crouch_cycle()
         self.policy_stop_event.clear()
-        self.squat_started_event.clear()
-        self.standing_reference_event.clear()
-        self._set_squat_command(False)
         self.inference_process = mp.Process(
             target=BoosterRobotPortal.inference_process_func,
             args=(
@@ -344,6 +377,7 @@ class BoosterRobotPortal:
             return False
         return (
             self.inference_ready_event.is_set()
+            and self.command_published_event.is_set()
             and self.low_cmd_publisher.get_subscription_count() > 0
         )
 
@@ -392,6 +426,8 @@ class BoosterRobotPortal:
         if process is None:
             return
         self.policy_stop_event.set()
+        self.inference_ready_event.clear()
+        self.command_published_event.clear()
         if process.is_alive():
             process.join(timeout=2.0)
         if process.is_alive():
@@ -443,14 +479,8 @@ class BoosterRobotPortal:
         except Exception as e:
             self.logger.error(f"Error closing remote control: {e}")
 
-        if self.low_cmd_process is not None and self.low_cmd_process.is_alive():
-            self.logger.info("Waiting for low cmd publisher process...")
-            self.low_cmd_process.join(timeout=2.0)
-            if self.low_cmd_process.is_alive():
-                self.logger.warning(
-                    "Low cmd publisher process did not stop, terminating...")
-                self.low_cmd_process.terminate()
-                self.low_cmd_process.join(timeout=1.0)
+        if self.low_cmd_thread is not None and self.low_cmd_thread.is_alive():
+            self.low_cmd_thread.join(timeout=2.0)
 
         try:
             thread = self.low_state_thread
@@ -552,13 +582,11 @@ class BoosterRobotController(BaseController):
                 self.robot.data.device)
 
     def ctrl_step(self, dof_targets: torch.Tensor) -> None:
-        for i in range(self.robot.num_joints):
-            self.portal.motor_cmd[i].q = float(dof_targets[i].item())
-            kp_val = float(self.robot.joint_stiffness[i].item())
-            kd_val = float(self.robot.joint_damping[i].item())
-            self.portal.motor_cmd[i].kp = kp_val
-            self.portal.motor_cmd[i].kd = kd_val
-        self.portal.low_cmd_publisher.publish(self.portal.low_cmd)
+        action = np.zeros((1,), dtype=self.portal.synced_action.dtype)
+        action[0]["dof_target"] = dof_targets.cpu().numpy()
+        action[0]["stiffness"] = self.robot.joint_stiffness.cpu().numpy()
+        action[0]["damping"] = self.robot.joint_damping.cpu().numpy()
+        self.portal.synced_action.write(action)
 
     def stop(self):
         super().stop()
@@ -596,7 +624,8 @@ class BoosterRobotController(BaseController):
                 self.portal.standing_reference_event.set()
             self.ctrl_step(dof_targets)
             if not first_command_published:
-                # Custom mode is gated on a complete inference/publish cycle.
+                # The parent publisher will acknowledge this shared action;
+                # CUSTOM is gated on both events.
                 self.portal.inference_ready_event.set()
                 first_command_published = True
 

@@ -71,6 +71,12 @@ The settling gate defaults to a maximum joint speed of `0.25` rad/s. This value
 and the five-tick settling window are configured by
 `BoosterRobotControllerCfg`.
 
+Policy inference runs in a replaceable worker process, but ROS publication
+remains in the parent process. Each new crouch clears the prior command,
+action-ready handshake, completion flags, and shared action buffer before
+starting a freshly reset policy worker. This keeps repeated crouches from
+reusing middleware or policy state from the previous cycle.
+
 MuJoCo initializes the robot directly from the model's embedded frame-zero
 root pose, orientation, and joint positions.
 
