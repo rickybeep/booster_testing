@@ -28,7 +28,6 @@ class MujocoControllerCfg:
 class BoosterRobotControllerCfg:
     low_state_dt: float = 0.002
     metrics_max_events: int = 2000
-    standing_joint_tolerance: float = 0.20
     standing_joint_velocity_tolerance: float = 0.25
     standing_stable_ticks: int = 5
 
