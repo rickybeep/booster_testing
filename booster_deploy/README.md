@@ -59,8 +59,10 @@ On the real robot, controller input arrives on
 `/remote_controller_state`. Deployment runs a `py_trees` workflow that observes
 the current high-level robot mode. In PREP, DAMP, or an unknown mode it sends no
 joint commands and requests no mode changes. While in WALK, press controller B
-(or keyboard `s`) to start the policy and enter CUSTOM mode for a crouch. Press
-it again to stand. The workflow returns the firmware to WALK only after the
+(or keyboard `s`) to start the policy and enter CUSTOM mode for a crouch. The
+policy publishes its standing command during the mode transition and begins
+the crouch trajectory only after the SDK confirms CUSTOM. Press the button
+again to stand. The workflow returns the firmware to WALK only after the
 ONNX trajectory reports its standing sentinel and measured joint velocities
 have remained below the configured settling tolerance for five workflow ticks.
 In MuJoCo, keyboard `s` retains the original immediate toggle behavior.

@@ -47,6 +47,9 @@ class FakeContext:
         self.calls.append("custom")
         self.current_mode = Mode.CUSTOM
 
+    def request_crouch(self) -> None:
+        self.calls.append("crouch")
+
     def request_stand(self) -> None:
         self.calls.append("stand")
 
@@ -99,7 +102,9 @@ class SquatWorkflowTest(unittest.TestCase):
 
         self.context.ready = True
         self.tick()
-        self.assertEqual(self.context.calls[-1], "custom")
+        self.assertEqual(
+            self.context.calls[-3:], ["custom", "discard", "crouch"]
+        )
 
         self.context.started = True
         self.context.requests = 1

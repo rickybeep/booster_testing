@@ -314,7 +314,7 @@ class BoosterRobotPortal:
         return publisher
 
     def begin_squat(self) -> bool:
-        """Start policy publication while firmware is still in walking mode."""
+        """Start by publishing the policy's safe standing command."""
         if not self.low_state_ready_event.is_set():
             return False
         if self.inference_process is not None and self.inference_process.is_alive():
@@ -323,7 +323,7 @@ class BoosterRobotPortal:
         self.policy_stop_event.clear()
         self.squat_started_event.clear()
         self.standing_reference_event.clear()
-        self.remoteControlService.set_squat_enabled(True)
+        self._set_squat_command(False)
         self.inference_process = mp.Process(
             target=BoosterRobotPortal.inference_process_func,
             args=(
@@ -348,13 +348,23 @@ class BoosterRobotPortal:
         )
 
     def enter_custom_mode(self) -> None:
-        self.logger.info("Policy ready; entering custom mode")
+        self.logger.info("Standing policy ready; requesting custom mode")
         self.client.change_mode(RobotMode.CUSTOM)
-        self.current_mode = RobotMode.CUSTOM
+
+    def request_crouch(self) -> None:
+        self._set_squat_command(True)
+        self.logger.info("Custom mode confirmed; starting crouch")
 
     def request_stand(self) -> None:
-        self.remoteControlService.set_squat_enabled(False)
+        self._set_squat_command(False)
         self.logger.info("Stand requested; waiting for policy and robot completion")
+
+    def _set_squat_command(self, enabled: bool) -> None:
+        """Update both command sources before the next inference frame."""
+        self.remoteControlService.set_squat_enabled(enabled)
+        command = np.zeros((1,), dtype=self.synced_command.dtype)
+        command[0]["squat_enabled"] = enabled
+        self.synced_command.write(command)
 
     def squat_has_started(self) -> bool:
         return self.squat_started_event.is_set()
@@ -394,11 +404,11 @@ class BoosterRobotPortal:
         self.logger.info("Robot is fully standing; returning to walking mode")
         self.client.change_mode(RobotMode.WALKING)
         self.current_mode = RobotMode.WALKING
-        self.remoteControlService.set_squat_enabled(False)
+        self._set_squat_command(False)
         self._stop_inference()
 
     def cancel_squat(self) -> None:
-        self.remoteControlService.set_squat_enabled(False)
+        self._set_squat_command(False)
         self._stop_inference()
 
     def cleanup(self) -> None:

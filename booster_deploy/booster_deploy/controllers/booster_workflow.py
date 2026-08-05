@@ -18,6 +18,8 @@ class SquatWorkflowContext(Protocol):
 
     def enter_custom_mode(self) -> None: ...
 
+    def request_crouch(self) -> None: ...
+
     def request_stand(self) -> None: ...
 
     def squat_has_started(self) -> bool: ...
@@ -90,16 +92,25 @@ class _RunSquatUntilStanding(py_trees.behaviour.Behaviour):
         self.custom = custom
         self.required_stable_ticks = stable_ticks
         self.stable_ticks = 0
+        self.crouch_requested = False
         self.stand_requested = False
 
     def initialise(self) -> None:
         self.stable_ticks = 0
+        self.crouch_requested = False
         self.stand_requested = False
 
     def update(self) -> py_trees.common.Status:
         if self.context.current_mode != self.custom:
             self.stable_ticks = 0
             return py_trees.common.Status.RUNNING
+
+        if not self.crouch_requested:
+            # Ignore button edges accumulated while the firmware was changing
+            # modes; standing must be requested with a fresh press in CUSTOM.
+            self.context.discard_crouch_request()
+            self.context.request_crouch()
+            self.crouch_requested = True
 
         if self.context.consume_crouch_request():
             self.context.request_stand()
