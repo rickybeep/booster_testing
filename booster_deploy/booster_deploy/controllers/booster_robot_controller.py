@@ -22,6 +22,7 @@ from .booster_workflow import create_squat_workflow
 from ..utils.synced_array import SyncedArray
 from ..utils.metrics import SyncedMetrics
 from ..utils.isaaclab import math as lab_math
+from ..utils.process_guard import ProcessOwner
 from ..utils.remote_control_service import RemoteControlService
 
 
@@ -58,6 +59,11 @@ class BoosterRobotPortal:
 
     def __init__(self, cfg: ControllerCfg, use_sim_time: bool = False) -> None:
         self.cfg = cfg
+
+        # ROS 2 and the SDK client live here and only here. The policy worker is
+        # a forked child that inherits them, and forked ROS 2 middleware is
+        # unusable, so every entry point that touches them asserts ownership.
+        self.ros_owner = ProcessOwner("the ROS 2 interface")
 
         self.robot = BoosterRobot(cfg.robot)
 
@@ -167,6 +173,7 @@ class BoosterRobotPortal:
         }
 
     def _init_communication(self) -> None:
+        self.ros_owner.assert_owner("ROS 2 initialization")
         try:
             self.client = BoosterClient()
             self.create_low_cmd_publisher("booster_deploy_low_cmd_pub")
@@ -184,6 +191,7 @@ class BoosterRobotPortal:
         """
 
         def low_state_service_executor():
+            self.ros_owner.assert_owner("Low state subscription")
             self.logger.info("Low state subscription started")
             low_state_node = rclpy.create_node("booster_deploy_low_state_sub")
             low_state_node.create_subscription(
@@ -318,6 +326,7 @@ class BoosterRobotPortal:
     def _start_low_cmd_publisher(self) -> None:
         """Publish shared policy actions without forking ROS middleware."""
         def publish_commands() -> None:
+            self.ros_owner.assert_owner("Low command publication")
             self.logger.info("Low command publisher started")
             while self.is_running and not self.exit_event.is_set():
                 if not self.inference_ready_event.wait(timeout=0.1):
@@ -370,6 +379,7 @@ class BoosterRobotPortal:
         return True
 
     def policy_is_ready(self) -> bool:
+        self.ros_owner.assert_owner("Publisher inspection")
         process = self.inference_process
         if process is not None and not process.is_alive():
             self.logger.error("Inference process died during initialization")
@@ -382,6 +392,7 @@ class BoosterRobotPortal:
         )
 
     def enter_custom_mode(self) -> None:
+        self.ros_owner.assert_owner("Mode change")
         self.logger.info("Standing policy ready; requesting custom mode")
         self.client.change_mode(RobotMode.CUSTOM)
 
@@ -437,6 +448,7 @@ class BoosterRobotPortal:
         self.inference_process = None
 
     def finish_squat(self) -> None:
+        self.ros_owner.assert_owner("Mode change")
         self.logger.info("Robot is fully standing; returning to walking mode")
         self.client.change_mode(RobotMode.WALKING)
         self.current_mode = RobotMode.WALKING
@@ -490,7 +502,9 @@ class BoosterRobotPortal:
         except Exception as e:
             self.logger.error(f"Error waiting for low state thread: {e}")
 
-        if rclpy.ok():
+        # Never shut ROS 2 down from a forked worker; that would tear the
+        # middleware out from under the parent that still owns it.
+        if self.ros_owner.is_owner() and rclpy.ok():
             rclpy.shutdown()
 
         self.logger.info("Cleanup complete")
@@ -530,11 +544,31 @@ class BoosterRobotPortal:
     def __exit__(self, *args) -> None:
         self.cleanup()
 
+    def detach_inherited_ros_handles(self) -> None:
+        """Drop this process's copies of the parent's fork-unsafe handles.
+
+        Called in the forked policy worker. The worker talks to the parent
+        exclusively through shared memory and events; clearing the inherited
+        publisher, node, and SDK client turns any accidental ROS 2 or mode call
+        into an immediate ``AttributeError`` instead of silent middleware
+        corruption. Only this process's copy is affected.
+        """
+        if self.ros_owner.is_owner():
+            raise RuntimeError("Refusing to detach ROS handles in the owner process")
+        self.client = None
+        self.publish_node = None
+        self.low_cmd_publisher = None
+        self.low_cmd = None
+        self.motor_cmd = None
+        self.low_state_thread = None
+        self.low_cmd_thread = None
+
     @staticmethod
     def inference_process_func(
         cfg: ControllerCfg,
         portal: BoosterRobotPortal,
     ) -> None:
+        portal.detach_inherited_ros_handles()
         BoosterRobotController(cfg, portal).run()
         portal.logger.info("Inference process stopped.")
 

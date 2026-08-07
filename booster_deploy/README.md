@@ -69,15 +69,28 @@ velocities have remained below the configured settling tolerance for five
 workflow ticks.
 In MuJoCo, keyboard `s` retains the original immediate toggle behavior.
 
-The settling gate defaults to a maximum joint speed of `0.25` rad/s. This value
-and the five-tick settling window are configured by
-`BoosterRobotControllerCfg`.
+Both standing gates are deliberately lenient, because the policy keeps
+balancing once it is standing rather than holding a fixed pose. The settling
+gate defaults to a maximum joint speed of `1.0` rad/s, against a stand-up
+transit that peaks above `6` rad/s and a settled stance below `0.05` rad/s in
+MuJoCo. The stance gate allows `0.45` rad of hip/knee pitch error, against
+`~0.13` rad measured while standing and `~0.89` rad at the bottom of a squat.
+The speed tolerance and the five-tick settling window are configured by
+`BoosterRobotControllerCfg`; the stance tolerance is `SquatPolicyCfg`'s
+`standing_joint_pos_tolerance`.
 
 Policy inference runs in a replaceable worker process, but ROS publication
-remains in the parent process. Each new crouch clears the prior command,
-action-ready handshake, completion flags, and shared action buffer before
-starting a freshly reset policy worker. This keeps repeated crouches from
-reusing middleware or policy state from the previous cycle.
+remains in the parent process, because ROS 2's communication layer cannot be
+reused after `fork()`. The worker reaches the parent only through shared memory
+and events. `ProcessOwner` pins the publisher, subscription, and SDK client to
+the parent and raises if another process tries to use them, and the worker drops
+its inherited copies of those handles on startup so an accidental call fails
+immediately instead of corrupting the middleware.
+
+Each new crouch clears the prior command, action-ready handshake, completion
+flags, and shared action buffer before starting a freshly reset policy worker.
+This keeps repeated crouches from reusing middleware or policy state from the
+previous cycle.
 
 MuJoCo initializes the robot at `MujocoControllerCfg.init_pos` with the default
 joint positions from the ONNX metadata.
@@ -106,8 +119,9 @@ It stops the policy when the upright gravity projection drops below
 
 The ONNX metadata supplies the default deployment stiffness and damping. Task
 specific overrides are loaded from `tasks/squat/gain_overrides.json` and are
-applied by joint name on top of those defaults. The included override sets both
-ankle pitch and roll damping values to `2.0` on each leg.
+applied by joint name on top of those defaults. The included override sets ankle
+pitch damping to `2.0`, ankle roll damping to `2.5`, and ankle roll stiffness to
+`35.0` on each leg.
 
 Either section is optional:
 
