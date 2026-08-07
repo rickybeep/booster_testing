@@ -40,7 +40,7 @@ JOINT_ALIASES = {
 HEAD_ACTION_SCALE_MULTIPLIER = 0.1
 
 # Squat depth shows up almost entirely in these joints: measured in MuJoCo they
-# sit within 0.13 rad of the default pose while standing and 0.89 rad away at
+# sit within 0.11 rad of the default pose while standing and 0.85 rad away at
 # the bottom of a squat. Roll and ankle joints drift with stance and are a poor
 # depth signal, so they are deliberately excluded.
 STANDING_JOINT_PATTERNS = ("_Hip_Pitch", "_Knee_Pitch")
@@ -273,10 +273,7 @@ class SquatPolicyCfg(PolicyCfg):
     # Smallest upright gravity projection tolerated before the policy stops;
     # 0.5 is roughly 60 degrees of trunk tilt.
     min_upright_projection: float = 0.5
-    # Standing is a balancing controller, not a pose hold: the stance drifts and
-    # never settles exactly on the default pose. Measured standing error is
-    # ~0.13 rad and a full squat is ~0.89 rad, so this sits well clear of both.
-    standing_joint_pos_tolerance: float = 0.45
+    standing_joint_pos_tolerance: float = 0.3
 
 
 @configclass

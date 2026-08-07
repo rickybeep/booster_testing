@@ -28,11 +28,7 @@ class MujocoControllerCfg:
 class BoosterRobotControllerCfg:
     low_state_dt: float = 0.002
     metrics_max_events: int = 2000
-    # The policy keeps balancing once it is standing, and encoder velocity is
-    # noisy, so this only has to separate a settled stance from the stand-up
-    # transit. In MuJoCo a settled stance reads below 0.05 rad/s and the transit
-    # peaks above 6 rad/s; 1.0 leaves ample room for real sensor noise.
-    standing_joint_velocity_tolerance: float = 1.0
+    standing_joint_velocity_tolerance: float = 0.25
     standing_stable_ticks: int = 5
 
 
