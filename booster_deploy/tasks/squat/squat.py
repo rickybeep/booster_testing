@@ -38,6 +38,7 @@ JOINT_ALIASES = {
     "Right_Shoulder_Pitch": "ARight_Shoulder_Pitch",
 }
 HEAD_ACTION_SCALE_MULTIPLIER = 0.1
+
 # Squat depth shows up almost entirely in these joints: measured in MuJoCo they
 # sit within 0.11 rad of the default pose while standing and 0.85 rad away at
 # the bottom of a squat. Roll and ankle joints drift with stance and are a poor
