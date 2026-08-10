@@ -1,11 +1,13 @@
 {
   "stiffness": {
-    "AAHead_yaw": 8.0,
-    "Head_pitch": 8.0,
+    "AAHead_yaw": 10.0,
+    "Head_pitch": 10.0,
     "Left_Ankle_Roll": 45.0,
     "Right_Ankle_Roll": 45.0
   },
   "damping": {
+    "AAHead_yaw": 1.0,
+    "Head_pitch": 1.0,
     "Left_Ankle_Pitch": 2.0,
     "Right_Ankle_Pitch": 2.0,
     "Left_Ankle_Roll": 2.5,
