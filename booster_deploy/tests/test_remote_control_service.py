@@ -61,40 +61,36 @@ class RemoteControlServiceTest(unittest.TestCase):
         self.assertEqual(service.get_velocity_command(), (0.2, -0.0, -0.0))
 
     def test_holding_dpad_moves_and_latches_head_angles(self) -> None:
-        now = [0.0]
         service = RemoteControlService(
             controller_available=True,
-            clock=lambda: now[0],
+            start_head_thread=False,
         )
         self.addCleanup(service.close)
 
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False)
         )
-        now[0] = 0.1
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, hat_l=True)
         )
+        service._advance_head_target(0.1)
         yaw, pitch = service.get_head_target()
         self.assertAlmostEqual(yaw, 0.08)
         self.assertAlmostEqual(pitch, 0.0)
-        now[0] = 0.2
-        service.handle_controller_state(
-            SimpleNamespace(a=False, b=False, hat_l=True)
-        )
+        service._advance_head_target(0.1)
         yaw, pitch = service.get_head_target()
         self.assertAlmostEqual(yaw, 0.16)
         self.assertAlmostEqual(pitch, 0.0)
 
-        now[0] = 0.3
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, hat_l=False)
         )
+        service._advance_head_target(0.1)
         self.assertAlmostEqual(service.get_head_target()[0], 0.16)
-        now[0] = 0.4
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, hat_ru=True)
         )
+        service._advance_head_target(0.1)
         yaw, pitch = service.get_head_target()
         self.assertAlmostEqual(yaw, 0.08)
         self.assertAlmostEqual(pitch, -0.08)

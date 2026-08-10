@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import atexit
-from collections.abc import Callable
 import select
 import sys
 import termios
 import threading
-import time
 import tty
 
 
@@ -15,7 +13,7 @@ MIN_TRANSLATIONAL_SPEED = 0.2
 MAX_TRANSLATIONAL_SPEED = 0.75
 MAX_YAW = 1.5
 HEAD_ANGULAR_SPEED = 0.8
-MAX_HEAD_UPDATE_DT = 0.1
+HEAD_UPDATE_PERIOD = 0.02
 HEAD_YAW_LIMIT = 1.0
 HEAD_PITCH_MIN = -0.349
 HEAD_PITCH_MAX = 0.855
@@ -29,11 +27,10 @@ class RemoteControlService:
         *,
         controller_available: bool = False,
         workflow_controls: bool = False,
-        clock: Callable[[], float] = time.monotonic,
+        start_head_thread: bool = True,
     ):
         self.controller_available = controller_available
         self.workflow_controls = workflow_controls
-        self._clock = clock
         self._lock = threading.Lock()
         self._running = True
         self._custom_mode_requested = False
@@ -45,12 +42,16 @@ class RemoteControlService:
         self._crouch_requests = 0
         self._velocity_command = (0.0, 0.0, 0.0)
         self._head_target = (0.0, 0.0)
-        self._last_controller_time: float | None = None
+        self._dpad_direction = (0.0, 0.0)
         self._stdin_tty = False
         self._old_termios = None
         self.keyboard_runner = None
+        self.head_runner = None
+        self._head_stop_event = threading.Event()
 
         self._start_keyboard_thread()
+        if start_head_thread:
+            self._start_head_thread()
         atexit.register(self.close)
 
     def get_operation_hint(self) -> str:
@@ -199,25 +200,10 @@ class RemoteControlService:
                 bool(getattr(msg, name, False))
                 for name in ("hat_d", "hat_ld", "hat_rd")
             )
-            now = self._clock()
-            if self._last_controller_time is None:
-                head_dt = 0.0
-            else:
-                head_dt = min(
-                    max(now - self._last_controller_time, 0.0),
-                    MAX_HEAD_UPDATE_DT,
-                )
-            self._last_controller_time = now
-            head_yaw, head_pitch = self._head_target
-            head_yaw += (
-                float(dpad_left) - float(dpad_right)
-            ) * HEAD_ANGULAR_SPEED * head_dt
-            head_pitch += (
-                float(dpad_down) - float(dpad_up)
-            ) * HEAD_ANGULAR_SPEED * head_dt
-            head_yaw = min(max(head_yaw, -HEAD_YAW_LIMIT), HEAD_YAW_LIMIT)
-            head_pitch = min(max(head_pitch, HEAD_PITCH_MIN), HEAD_PITCH_MAX)
-            self._head_target = (head_yaw, head_pitch)
+            self._dpad_direction = (
+                float(dpad_left) - float(dpad_right),
+                float(dpad_down) - float(dpad_up),
+            )
 
             if a_pressed and not self._controller_a_pressed:
                 self._custom_mode_requested = True
@@ -241,6 +227,29 @@ class RemoteControlService:
 
         if squat_state is not None:
             print(f"Squat {squat_state}")
+
+    def _advance_head_target(self, dt: float) -> None:
+        """Integrate the latched D-pad direction for one time interval."""
+        with self._lock:
+            yaw_direction, pitch_direction = self._dpad_direction
+            head_yaw, head_pitch = self._head_target
+            head_yaw += yaw_direction * HEAD_ANGULAR_SPEED * dt
+            head_pitch += pitch_direction * HEAD_ANGULAR_SPEED * dt
+            head_yaw = min(max(head_yaw, -HEAD_YAW_LIMIT), HEAD_YAW_LIMIT)
+            head_pitch = min(max(head_pitch, HEAD_PITCH_MIN), HEAD_PITCH_MAX)
+            self._head_target = (head_yaw, head_pitch)
+
+    def _start_head_thread(self) -> None:
+        self.head_runner = threading.Thread(
+            target=self._head_control_loop,
+            daemon=True,
+            name="dpad-head-control",
+        )
+        self.head_runner.start()
+
+    def _head_control_loop(self) -> None:
+        while not self._head_stop_event.wait(HEAD_UPDATE_PERIOD):
+            self._advance_head_target(HEAD_UPDATE_PERIOD)
 
     def _start_keyboard_thread(self) -> None:
         try:
@@ -274,6 +283,7 @@ class RemoteControlService:
         if not self._running:
             return
         self._running = False
+        self._head_stop_event.set()
         if self._stdin_tty and self._old_termios is not None:
             try:
                 termios.tcsetattr(
@@ -286,6 +296,11 @@ class RemoteControlService:
             and self.keyboard_runner is not threading.current_thread()
         ):
             self.keyboard_runner.join(timeout=1.0)
+        if (
+            self.head_runner is not None
+            and self.head_runner is not threading.current_thread()
+        ):
+            self.head_runner.join(timeout=1.0)
 
     def __enter__(self):
         return self
