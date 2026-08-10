@@ -12,6 +12,10 @@ JOYSTICK_DEAD_ZONE = 0.1
 MIN_TRANSLATIONAL_SPEED = 0.2
 MAX_TRANSLATIONAL_SPEED = 0.75
 MAX_YAW = 1.5
+HEAD_ANGLE_STEP = 0.1
+HEAD_YAW_LIMIT = 1.0
+HEAD_PITCH_MIN = -0.349
+HEAD_PITCH_MAX = 0.855
 
 
 class RemoteControlService:
@@ -35,6 +39,8 @@ class RemoteControlService:
         self._controller_b_pressed = False
         self._crouch_requests = 0
         self._velocity_command = (0.0, 0.0, 0.0)
+        self._head_target = (0.0, 0.0)
+        self._dpad_pressed = (False, False, False, False)
         self._stdin_tty = False
         self._old_termios = None
         self.keyboard_runner = None
@@ -67,6 +73,7 @@ class RemoteControlService:
                     "  First controller B / s       Enable learned walk and enter CUSTOM",
                     "  Left stick                   Walk (0.2-0.75 m/s outside dead zone)",
                     "  Right stick horizontal       Turn",
+                    "  D-pad left/right, up/down    Head yaw, pitch",
                     "  Later controller B / s       Squat, then stand and resume walk",
                     "  PREP/DAMP                     No deployment action",
                 )
@@ -106,6 +113,11 @@ class RemoteControlService:
     def get_velocity_command(self) -> tuple[float, float, float]:
         with self._lock:
             return self._velocity_command
+
+    def get_head_target(self) -> tuple[float, float]:
+        """Return the latched `(yaw, pitch)` target in radians."""
+        with self._lock:
+            return self._head_target
 
     def consume_crouch_request(self) -> bool:
         """Consume one workflow button edge, if one is pending."""
@@ -165,6 +177,36 @@ class RemoteControlService:
                 vy = direction_y / stick_magnitude * speed
             yaw = -float(getattr(msg, "rx", 0.0)) * MAX_YAW
             self._velocity_command = (vx, vy, yaw)
+
+            dpad_left = any(
+                bool(getattr(msg, name, False))
+                for name in ("hat_l", "hat_lu", "hat_ld")
+            )
+            dpad_right = any(
+                bool(getattr(msg, name, False))
+                for name in ("hat_r", "hat_ru", "hat_rd")
+            )
+            dpad_up = any(
+                bool(getattr(msg, name, False))
+                for name in ("hat_u", "hat_lu", "hat_ru")
+            )
+            dpad_down = any(
+                bool(getattr(msg, name, False))
+                for name in ("hat_d", "hat_ld", "hat_rd")
+            )
+            dpad_pressed = (dpad_left, dpad_right, dpad_up, dpad_down)
+            previous_dpad = self._dpad_pressed
+            head_yaw, head_pitch = self._head_target
+            if dpad_left and not previous_dpad[0]:
+                head_yaw = min(head_yaw + HEAD_ANGLE_STEP, HEAD_YAW_LIMIT)
+            if dpad_right and not previous_dpad[1]:
+                head_yaw = max(head_yaw - HEAD_ANGLE_STEP, -HEAD_YAW_LIMIT)
+            if dpad_up and not previous_dpad[2]:
+                head_pitch = max(head_pitch - HEAD_ANGLE_STEP, HEAD_PITCH_MIN)
+            if dpad_down and not previous_dpad[3]:
+                head_pitch = min(head_pitch + HEAD_ANGLE_STEP, HEAD_PITCH_MAX)
+            self._head_target = (head_yaw, head_pitch)
+            self._dpad_pressed = dpad_pressed
 
             if a_pressed and not self._controller_a_pressed:
                 self._custom_mode_requested = True

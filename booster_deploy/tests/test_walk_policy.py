@@ -22,6 +22,7 @@ class FakeController:
         self.robot.data.joint_pos = self.robot.default_joint_pos.clone()
         self.squat_enabled = False
         self.velocity_command = (0.0, 0.0, 0.0)
+        self.head_target = (0.0, 0.0)
         self.stopped = False
 
     def stop(self) -> None:
@@ -52,12 +53,18 @@ class WalkPolicyTest(unittest.TestCase):
         self.policy.session = self.session
 
     def test_history_is_seeded_then_slides_oldest_to_newest(self) -> None:
+        self.controller.robot.data.joint_pos[0] = 0.7
+        self.controller.robot.data.joint_pos[1] = -0.2
+        self.controller.robot.data.joint_vel[0] = 1.0
+        self.controller.robot.data.joint_vel[1] = -1.0
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
         history = inputs["history"]
         self.assertEqual(history.shape, (1, HISTORY_LENGTH, HISTORY_FRAME_SIZE))
         np.testing.assert_array_equal(history[0], np.repeat(history[:, :1], 50, axis=1)[0])
+        np.testing.assert_array_equal(history[0, -1, 6:8], [0.0, 0.0])
+        np.testing.assert_array_equal(history[0, -1, 28:30], [0.0, 0.0])
 
         first_frame = history[0, -1].copy()
         self.controller.robot.data.root_ang_vel_b[0] = 1.0
@@ -119,6 +126,12 @@ class WalkPolicyTest(unittest.TestCase):
         self.policy.inference()
         self.assertFalse(self.policy.is_squat_active())
         self.assertTrue(torch.equal(self.controller.robot.joint_stiffness, walk_stiffness))
+
+    def test_walk_output_uses_manual_head_target(self) -> None:
+        self.controller.head_target = (0.4, -0.2)
+        targets = self.policy.inference()
+        self.assertAlmostEqual(float(targets[0]), 0.4)
+        self.assertAlmostEqual(float(targets[1]), -0.2)
 
 
 if __name__ == "__main__":

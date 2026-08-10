@@ -278,6 +278,10 @@ class WalkPolicy(Policy):
         policy_targets = self.default_joint_pos + self.action_scale * action
         robot_targets = self.robot.default_joint_pos.clone()
         robot_targets[self.policy_to_robot] = torch.from_numpy(policy_targets)
+        robot_targets[self.policy_to_robot[self.head_indices]] = torch.tensor(
+            self.controller.head_target,
+            dtype=torch.float32,
+        )
         return robot_targets
 
     def _start_squat(self) -> None:

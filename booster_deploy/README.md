@@ -74,6 +74,11 @@ Press it again to stand; once the measured standing pose is restored, walking
 resumes with freshly seeded history. In MuJoCo, the gait command stays zero and
 keyboard `s` controls the same policy switch.
 
+While learned walking is active, the D-pad controls the head independently of
+the gait: left/right step yaw and up/down step pitch by `0.1 rad` per press.
+Targets remain latched and are clamped to the K1 joint limits (yaw `±1.0 rad`,
+pitch `-0.349–0.855 rad`). Positive pitch looks down.
+
 Policy inference runs in a worker process while ROS subscription and
 publication remain in the parent process. Leaving WALK/CUSTOM stops low-level
 inference and clears the publication handshake.
@@ -91,7 +96,9 @@ Like Maelstrom's history-stacked gait wrapper, the first frame fills every
 history slot; subsequent steps discard the oldest frame and append the newest.
 Head position and velocity observations are masked to zero. Velocity commands
 are constrained to a nonzero translational magnitude of `0.2–0.75 m/s` before
-inference; an exact zero remains zero.
+inference; an exact zero remains zero. The model still produces 22 actions, but
+its two head targets are overwritten with the latched D-pad angles during walk
+inference. The squat policy retains control of the head while it is active.
 
 The output is one `[1, 22]` action tensor. Joint targets are
 `default_joint_pos + action_scale * action`, with metadata providing the joint

@@ -159,6 +159,7 @@ class BaseController:
         self.is_running: bool = False
         self.squat_enabled: bool = False
         self.velocity_command: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.head_target: tuple[float, float] = (0.0, 0.0)
         self.robot = BoosterRobot(cfg.robot)
         self.policy = self.cfg.policy.constructor(self.cfg.policy, self)
 

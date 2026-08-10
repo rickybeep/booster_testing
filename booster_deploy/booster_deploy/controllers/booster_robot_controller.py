@@ -154,6 +154,7 @@ class BoosterRobotPortal:
             [
                 ("squat_enabled", np.bool_),
                 ("velocity", np.float32, (3,)),
+                ("head_target", np.float32, (2,)),
             ]
         )
         self.synced_command = SyncedArray(
@@ -285,6 +286,7 @@ class BoosterRobotPortal:
             cmd[0]["squat_enabled"] = (
                 self.remoteControlService.get_squat_enabled()
             )
+            cmd[0]["head_target"] = self.remoteControlService.get_head_target()
             if self.current_mode == RobotMode.CUSTOM:
                 cmd[0]["velocity"] = (
                     self.remoteControlService.get_velocity_command()
@@ -412,6 +414,7 @@ class BoosterRobotPortal:
         self.remoteControlService.set_squat_enabled(enabled)
         command = np.zeros((1,), dtype=self.synced_command.dtype)
         command[0]["squat_enabled"] = enabled
+        command[0]["head_target"] = self.remoteControlService.get_head_target()
         if self.current_mode == RobotMode.CUSTOM:
             command[0]["velocity"] = (
                 self.remoteControlService.get_velocity_command()
@@ -575,6 +578,7 @@ class BoosterRobotController(BaseController):
         cmd = self.portal.synced_command.read()[0]
         self.squat_enabled = bool(cmd["squat_enabled"])
         self.velocity_command = tuple(float(value) for value in cmd["velocity"])
+        self.head_target = tuple(float(value) for value in cmd["head_target"])
 
     def update_state(self) -> None:
         state = self.portal.synced_state.read()[0]
