@@ -328,18 +328,6 @@ class SquatPolicy(Policy):
                 np.concatenate((current_ref_pos, current_ref_quat, robot_ref_joints))
             )
 
-        if self.cfg.enable_safety_fallback:
-            gravity = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32)
-            actual_gravity = lab_math.quat_apply_inverse(
-                self.robot.data.root_quat_w, gravity
-            )
-            reference_gravity = lab_math.quat_apply_inverse(
-                torch.from_numpy(current_ref_quat), gravity
-            )
-            if torch.dot(actual_gravity, reference_gravity) < 0.5:
-                print("\nLarge squat orientation error detected; stopping policy.")
-                self.controller.stop()
-
         self.last_action = action.copy()
         action_defaults = self.default_joint_pos[self.action_to_policy]
         policy_targets = action_defaults + self.action_scale * action
