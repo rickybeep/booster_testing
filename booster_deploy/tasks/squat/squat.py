@@ -19,27 +19,18 @@ from booster_deploy.utils.isaaclab import math as lab_math
 from booster_deploy.utils.isaaclab.configclass import configclass
 
 
-INPUT_NAMES = ("obs", "squat_enabled", "squat_state_in")
-OBSERVATION_SIZE = 122
-OUTPUT_NAMES = (
-    "actions",
-    "squat_state_out",
-    "joint_pos",
-    "joint_vel",
-    "body_pos_w",
-    "body_quat_w",
-    "body_lin_vel_w",
-    "body_ang_vel_w",
-)
+INPUT_NAMES = ("obs",)
+OUTPUT_NAMES = ("actions",)
+OBSERVATION_SIZE = 73
 EXPECTED_OBSERVATIONS = (
-    "command",
-    "motion_anchor_ori_b",
     "base_ang_vel",
+    "projected_gravity",
     "joint_pos",
     "joint_vel",
     "actions",
-    "projected_gravity",
+    "command",
 )
+EXPECTED_COMMANDS = ("squat",)
 JOINT_ALIASES = {
     "Head_Yaw": "AAHead_yaw",
     "Head_Pitch": "Head_pitch",
@@ -47,6 +38,12 @@ JOINT_ALIASES = {
     "Right_Shoulder_Pitch": "ARight_Shoulder_Pitch",
 }
 HEAD_ACTION_SCALE_MULTIPLIER = 0.1
+
+# Squat depth shows up almost entirely in these joints: measured in MuJoCo they
+# sit within 0.11 rad of the default pose while standing and 0.85 rad away at
+# the bottom of a squat. Roll and ankle joints drift with stance and are a poor
+# depth signal, so they are deliberately excluded.
+STANDING_JOINT_PATTERNS = ("_Hip_Pitch", "_Knee_Pitch")
 
 
 def _csv(metadata: dict[str, str], key: str) -> list[str]:
@@ -61,7 +58,13 @@ def _float_csv(metadata: dict[str, str], key: str) -> np.ndarray:
 
 
 class SquatPolicy(Policy):
-    """Stateful deployment wrapper for the toggle-controlled squat ONNX."""
+    """Deployment wrapper for the binary-command squat ONNX.
+
+    The policy is feed-forward: a single observation vector in, joint position
+    offsets out. Squatting is requested with a scalar command appended to the
+    observation, so this wrapper only owns the previous action and the
+    observation layout.
+    """
 
     def __init__(self, cfg: SquatPolicyCfg, controller: BaseController):
         super().__init__(cfg, controller)
@@ -78,10 +81,6 @@ class SquatPolicy(Policy):
         self._validate_model()
 
         self.policy_joint_names = _csv(self.metadata, "joint_names")
-        self.policy_body_names = _csv(self.metadata, "body_names")
-        self.anchor_index = self.policy_body_names.index(
-            self.metadata["anchor_body_name"]
-        )
         self.default_joint_pos = _float_csv(self.metadata, "default_joint_pos")
         self.action_scale = _float_csv(self.metadata, "action_scale")
         for joint_name in ("Head_Yaw", "Head_Pitch"):
@@ -92,6 +91,14 @@ class SquatPolicy(Policy):
             [
                 self.robot.cfg.joint_names.index(JOINT_ALIASES.get(name, name))
                 for name in self.policy_joint_names
+            ],
+            dtype=np.int64,
+        )
+        self.standing_joint_indices = np.asarray(
+            [
+                index
+                for index, name in enumerate(self.policy_joint_names)
+                if any(pattern in name for pattern in STANDING_JOINT_PATTERNS)
             ],
             dtype=np.int64,
         )
@@ -109,20 +116,32 @@ class SquatPolicy(Policy):
             )
         if tuple(outputs) != OUTPUT_NAMES:
             raise ValueError(
-                f"Unexpected squat ONNX outputs: {tuple(outputs)}; expected {OUTPUT_NAMES}"
+                f"Unexpected squat ONNX outputs: {tuple(outputs)}; "
+                f"expected {OUTPUT_NAMES}"
             )
         if inputs["obs"].shape != [1, OBSERVATION_SIZE]:
             raise ValueError(
                 "Squat ONNX obs must be "
                 f"[1, {OBSERVATION_SIZE}], got {inputs['obs'].shape}"
             )
-        if inputs["squat_state_in"].shape != [1, 3]:
-            raise ValueError("Squat ONNX state must be [1, 3]")
         observations = tuple(_csv(self.metadata, "observation_names"))
         if observations != EXPECTED_OBSERVATIONS:
-            raise ValueError(
-                f"Unexpected squat observation layout: {observations}"
-            )
+            raise ValueError(f"Unexpected squat observation layout: {observations}")
+        commands = tuple(_csv(self.metadata, "command_names"))
+        if commands != EXPECTED_COMMANDS:
+            raise ValueError(f"Unexpected squat command layout: {commands}")
+
+        # This wrapper builds raw, unscaled, history-free observations. Anything
+        # else in the artifact would silently change what the policy sees.
+        scales = _float_csv(self.metadata, "observation_terms_scale")
+        if not np.all(scales == 1.0):
+            raise ValueError(f"Squat ONNX expects observation scaling: {scales}")
+        history = _float_csv(self.metadata, "observation_terms_history_length")
+        if not np.all(history == 0.0):
+            raise ValueError(f"Squat ONNX expects observation history: {history}")
+        clips = _csv(self.metadata, "observation_terms_clip")
+        if any(clip != "-inf;inf" for clip in clips):
+            raise ValueError(f"Squat ONNX expects observation clipping: {clips}")
         if len(_csv(self.metadata, "joint_names")) != self.robot.num_joints:
             raise ValueError("Squat ONNX joint count does not match the robot")
 
@@ -189,77 +208,10 @@ class SquatPolicy(Policy):
                 gain_tensor[joint_index] = float(value)
 
     def reset(self) -> None:
-        self.squat_state = np.asarray([[0, 0, 1]], dtype=np.int64)
-        self.last_action = np.zeros((22,), dtype=np.float32)
-        self.init_root_yaw_quat_w_inv = lab_math.quat_inv(
-            lab_math.yaw_quat(self.robot.data.root_quat_w)
-        )
-
-        # A disabled standing call returns the exact frame-zero reference
-        # embedded in the model. Its action is deliberately discarded.
-        seeded = self.session.run(
-            list(OUTPUT_NAMES),
-            {
-                "obs": np.zeros((1, OBSERVATION_SIZE), dtype=np.float32),
-                "squat_enabled": np.zeros((1, 1), dtype=np.float32),
-                "squat_state_in": self.squat_state,
-            },
-        )
-        self.squat_state = seeded[1]
-        self._set_reference(seeded[2:])
-        self.init_reference_yaw_quat_w_inv = lab_math.quat_inv(
-            lab_math.yaw_quat(
-                torch.from_numpy(self.ref_body_quat_w[self.anchor_index])
-            )
-        )
-
-    def _set_reference(self, arrays: list[np.ndarray]) -> None:
-        (
-            joint_pos,
-            joint_vel,
-            body_pos_w,
-            body_quat_w,
-            body_lin_vel_w,
-            body_ang_vel_w,
-        ) = arrays
-        self.ref_joint_pos = joint_pos[0].astype(np.float32, copy=False)
-        self.ref_joint_vel = joint_vel[0].astype(np.float32, copy=False)
-        self.ref_body_pos_w = body_pos_w[0].astype(np.float32, copy=False)
-        self.ref_body_quat_w = body_quat_w[0].astype(np.float32, copy=False)
-        self.ref_body_lin_vel_w = body_lin_vel_w[0].astype(np.float32, copy=False)
-        self.ref_body_ang_vel_w = body_ang_vel_w[0].astype(np.float32, copy=False)
-
-    def get_initial_qpos(self) -> np.ndarray:
-        """Return the embedded standing reference in MuJoCo joint order."""
-        robot_ref_joints = np.empty(self.robot.num_joints, dtype=np.float32)
-        robot_ref_joints[self.policy_to_robot] = self.ref_joint_pos
-        return np.concatenate(
-            (
-                self.ref_body_pos_w[self.anchor_index],
-                self.ref_body_quat_w[self.anchor_index],
-                robot_ref_joints,
-            )
-        )
+        self.last_action = np.zeros((self.robot.num_joints,), dtype=np.float32)
+        self.squat_commanded = False
 
     def compute_observation(self) -> np.ndarray:
-        current_quat = lab_math.quat_mul(
-            self.init_root_yaw_quat_w_inv, self.robot.data.root_quat_w
-        )
-        reference_quat = torch.from_numpy(
-            self.ref_body_quat_w[self.anchor_index]
-        )
-        reference_quat = lab_math.quat_mul(
-            self.init_reference_yaw_quat_w_inv, reference_quat
-        )
-
-        _, anchor_quat = lab_math.subtract_frame_transforms(
-            torch.zeros(3),
-            current_quat,
-            torch.zeros(3),
-            reference_quat,
-        )
-
-        anchor_ori = lab_math.matrix_from_quat(anchor_quat)[..., :2].flatten()
         projected_gravity = lab_math.quat_apply_inverse(
             self.robot.data.root_quat_w,
             torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32),
@@ -269,14 +221,12 @@ class SquatPolicy(Policy):
 
         observation = np.concatenate(
             (
-                self.ref_joint_pos,
-                self.ref_joint_vel,
-                anchor_ori.cpu().numpy(),
                 self.robot.data.root_ang_vel_b.cpu().numpy(),
+                projected_gravity.cpu().numpy(),
                 joint_pos - self.default_joint_pos,
                 joint_vel,
                 self.last_action,
-                projected_gravity.cpu().numpy(),
+                np.asarray([float(self.squat_commanded)]),
             )
         ).astype(np.float32, copy=False)
         if observation.shape != (OBSERVATION_SIZE,):
@@ -284,40 +234,16 @@ class SquatPolicy(Policy):
         return observation[None, :]
 
     def inference(self) -> torch.Tensor:
+        self.squat_commanded = bool(self.controller.squat_enabled)
         observation = self.compute_observation()
-        current_ref_pos = self.ref_body_pos_w[self.anchor_index].copy()
-        current_ref_quat = self.ref_body_quat_w[self.anchor_index].copy()
-        current_ref_joints = self.ref_joint_pos.copy()
-        results = self.session.run(
-            list(OUTPUT_NAMES),
-            {
-                "obs": observation,
-                "squat_enabled": np.asarray(
-                    [[float(self.controller.squat_enabled)]], dtype=np.float32
-                ),
-                "squat_state_in": self.squat_state,
-            },
-        )
+        results = self.session.run(list(OUTPUT_NAMES), {"obs": observation})
         action = results[0][0].astype(np.float32, copy=False)
-        self.squat_state = results[1]
-        self._set_reference(results[2:])
-
-        if hasattr(self.controller, "set_reference_qpos"):
-            robot_ref_joints = np.empty(self.robot.num_joints, dtype=np.float32)
-            robot_ref_joints[self.policy_to_robot] = current_ref_joints
-            self.controller.set_reference_qpos(  # type: ignore[attr-defined]
-                np.concatenate((current_ref_pos, current_ref_quat, robot_ref_joints))
-            )
 
         if self.cfg.enable_safety_fallback:
-            gravity = torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32)
-            actual_gravity = lab_math.quat_apply_inverse(
-                self.robot.data.root_quat_w, gravity
-            )
-            reference_gravity = lab_math.quat_apply_inverse(
-                torch.from_numpy(current_ref_quat), gravity
-            )
-            if torch.dot(actual_gravity, reference_gravity) < 0.5:
+            # observation[0, 3:6] is projected gravity; its z component is -1
+            # when upright and rises toward zero as the trunk tips over.
+            upright = -float(observation[0, 5])
+            if upright < self.cfg.min_upright_projection:
                 print("\nLarge squat orientation error detected; stopping policy.")
                 self.controller.stop()
 
@@ -327,9 +253,16 @@ class SquatPolicy(Policy):
         robot_targets[self.policy_to_robot] = torch.from_numpy(policy_targets)
         return robot_targets
 
-    def is_standing_reference(self) -> bool:
-        """Whether the ONNX trajectory state is back at its standing sentinel."""
-        return bool(np.array_equal(self.squat_state, [[0, 0, 1]]))
+    def is_standing_pose(self) -> bool:
+        """Whether standing is commanded and the legs are back at their stance."""
+        if self.squat_commanded:
+            return False
+        joint_pos = self.robot.data.joint_pos[self.policy_to_robot].cpu().numpy()
+        error = np.abs(joint_pos - self.default_joint_pos)
+        return bool(
+            np.max(error[self.standing_joint_indices])
+            <= self.cfg.standing_joint_pos_tolerance
+        )
 
 
 @configclass
@@ -337,6 +270,10 @@ class SquatPolicyCfg(PolicyCfg):
     constructor = SquatPolicy
     checkpoint_path: str = MISSING
     gain_overrides_path: str | None = "gain_overrides.json"
+    # Smallest upright gravity projection tolerated before the policy stops;
+    # 0.5 is roughly 60 degrees of trunk tilt.
+    min_upright_projection: float = 0.5
+    standing_joint_pos_tolerance: float = 0.3
 
 
 @configclass
@@ -347,5 +284,4 @@ class K1SquatControllerCfg(ControllerCfg):
     )
     mujoco = MujocoControllerCfg(
         init_pos=[0.0, 0.0, 0.518],
-        visualize_reference_ghost=True,
     )

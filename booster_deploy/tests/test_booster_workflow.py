@@ -56,7 +56,7 @@ class FakeContext:
     def squat_has_started(self) -> bool:
         return self.started
 
-    def standing_reference_complete(self) -> bool:
+    def standing_pose_complete(self) -> bool:
         return self.reference_complete
 
     def robot_is_standing(self) -> bool:

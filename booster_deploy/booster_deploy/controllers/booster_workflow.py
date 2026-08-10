@@ -24,7 +24,7 @@ class SquatWorkflowContext(Protocol):
 
     def squat_has_started(self) -> bool: ...
 
-    def standing_reference_complete(self) -> bool: ...
+    def standing_pose_complete(self) -> bool: ...
 
     def robot_is_standing(self) -> bool: ...
 
@@ -117,7 +117,7 @@ class _RunSquatUntilStanding(py_trees.behaviour.Behaviour):
             self.stand_requested = True
 
         started = self.context.squat_has_started()
-        reference_complete = self.context.standing_reference_complete()
+        reference_complete = self.context.standing_pose_complete()
         robot_standing = self.context.robot_is_standing()
         complete = (
             self.stand_requested

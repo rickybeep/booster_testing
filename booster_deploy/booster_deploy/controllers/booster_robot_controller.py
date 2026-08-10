@@ -75,7 +75,7 @@ class BoosterRobotPortal:
         self.command_published_event = mp.Event()
         self.policy_stop_event = mp.Event()
         self.squat_started_event = mp.Event()
-        self.standing_reference_event = mp.Event()
+        self.standing_pose_event = mp.Event()
         self.low_state_ready_event = mp.Event()
         self.is_running = True
         self.timer = CountTimer(
@@ -345,7 +345,7 @@ class BoosterRobotPortal:
         self.inference_ready_event.clear()
         self.command_published_event.clear()
         self.squat_started_event.clear()
-        self.standing_reference_event.clear()
+        self.standing_pose_event.clear()
         self._action_buf.fill(0)
         self.synced_action.write(self._action_buf)
 
@@ -403,8 +403,8 @@ class BoosterRobotPortal:
     def squat_has_started(self) -> bool:
         return self.squat_started_event.is_set()
 
-    def standing_reference_complete(self) -> bool:
-        return self.standing_reference_event.is_set()
+    def standing_pose_complete(self) -> bool:
+        return self.standing_pose_event.is_set()
 
     def robot_is_standing(self) -> bool:
         if not self.low_state_ready_event.is_set():
@@ -612,16 +612,13 @@ class BoosterRobotController(BaseController):
             self.portal.metrics["policy_step"].mark()
             dof_targets = self.policy_step()
             is_standing = bool(
-                getattr(self.policy, "is_standing_reference", lambda: False)()
+                getattr(self.policy, "is_standing_pose", lambda: False)()
             )
             if not is_standing:
                 self.portal.squat_started_event.set()
-                self.portal.standing_reference_event.clear()
-            elif (
-                self.portal.squat_started_event.is_set()
-                and not self.squat_enabled
-            ):
-                self.portal.standing_reference_event.set()
+                self.portal.standing_pose_event.clear()
+            elif self.portal.squat_started_event.is_set():
+                self.portal.standing_pose_event.set()
             self.ctrl_step(dof_targets)
             if not first_command_published:
                 # The parent publisher will acknowledge this shared action;

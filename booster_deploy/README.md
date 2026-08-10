@@ -1,9 +1,9 @@
 # Booster Squat Deploy
 
 This repository deploys the toggle-controlled Booster K1 squat policy in
-MuJoCo or on a real robot. The ONNX model owns the reversible squat state
-machine; deployment only persists its opaque state and supplies the operator's
-enabled/disabled command.
+MuJoCo or on a real robot. The ONNX model is a plain feed-forward policy:
+deployment builds its observation, appends the operator's binary squat command,
+and applies the returned joint position offsets.
 
 ## Install
 
@@ -61,10 +61,12 @@ the current high-level robot mode. In PREP, DAMP, or an unknown mode it sends no
 joint commands and requests no mode changes. While in WALK, press controller B
 (or keyboard `s`) to start the policy and enter CUSTOM mode for a crouch. The
 policy publishes its standing command during the mode transition and begins
-the crouch trajectory only after the SDK confirms CUSTOM. Press the button
+crouching only after the SDK confirms CUSTOM. Press the button
 again to stand. The workflow returns the firmware to WALK only after the
-ONNX trajectory reports its standing sentinel and measured joint velocities
-have remained below the configured settling tolerance for five workflow ticks.
+measured hip pitch and knee pitch joints are back within
+`standing_joint_pos_tolerance` of the standing stance and measured joint
+velocities have remained below the configured settling tolerance for five
+workflow ticks.
 In MuJoCo, keyboard `s` retains the original immediate toggle behavior.
 
 The settling gate defaults to a maximum joint speed of `0.25` rad/s. This value
@@ -77,20 +79,28 @@ action-ready handshake, completion flags, and shared action buffer before
 starting a freshly reset policy worker. This keeps repeated crouches from
 reusing middleware or policy state from the previous cycle.
 
-MuJoCo initializes the robot directly from the model's embedded frame-zero
-root pose, orientation, and joint positions.
+MuJoCo initializes the robot at `MujocoControllerCfg.init_pos` with the default
+joint positions from the ONNX metadata.
 
-## Stateful ONNX contract
+## ONNX contract
 
-The model inputs are `obs`, `squat_enabled`, and `squat_state_in`. Every call
-returns actions, `squat_state_out`, and the next reference arrays. Deployment
-feeds the returned state and references into the next control step without
-interpreting the state machine. Startup and policy reset restore disabled
-standing state `[0, 0, 1]` and the embedded frame-zero reference.
+The model takes a single `[1, 73]` `obs` input and returns a single `[1, 22]`
+`actions` output. The observation is, in order, base angular velocity (3),
+projected gravity (3), joint positions relative to the default pose (22), joint
+velocities (22), the previous action (22), and the binary squat command (1).
+Actions are joint position offsets: targets are
+`default_joint_pos + action_scale * action`. Deployment scales the two head
+joints down to 10% of the trained action scale; the head does not contribute to
+balance and the full range is unnecessarily lively on hardware.
 
-The policy observation intentionally omits trunk translation and base linear
-velocity, so the same 122-value observation is constructed from signals
-available in both MuJoCo and on the real robot.
+The observation intentionally omits trunk translation and base linear velocity,
+so the same vector is built from signals available in both MuJoCo and on the
+real robot. Startup and policy reset only clear the previous action.
+
+The policy carries no internal trajectory, so the safety fallback compares the
+measured trunk orientation against vertical instead of against a reference pose.
+It stops the policy when the upright gravity projection drops below
+`min_upright_projection` (`0.5`, roughly 60 degrees of tilt).
 
 ## Gain overrides
 
