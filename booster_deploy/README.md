@@ -89,7 +89,7 @@ interpreting the state machine. Startup and policy reset restore disabled
 standing state `[0, 0, 1]` and the embedded frame-zero reference.
 
 The policy observation intentionally omits trunk translation and base linear
-velocity, so the same 122-value observation is constructed from signals
+velocity, so the same 120-value observation is constructed from signals
 available in both MuJoCo and on the real robot.
 
 ## Gain overrides
@@ -122,6 +122,6 @@ pixi run lint
 pixi run ros-build
 ```
 
-The tracked policy artifact is `tasks/squat/models/squat.onnx`. Its metadata is
+The tracked policy artifact is `tasks/squat/models/sitdown.onnx`. Its metadata is
 validated at startup and is the source of truth for observation layout, joint
 order, default positions, gains, and action scaling.

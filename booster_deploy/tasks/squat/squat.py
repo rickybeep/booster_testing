@@ -20,7 +20,7 @@ from booster_deploy.utils.isaaclab.configclass import configclass
 
 
 INPUT_NAMES = ("obs", "squat_enabled", "squat_state_in")
-OBSERVATION_SIZE = 122
+OBSERVATION_SIZE = 120
 OUTPUT_NAMES = (
     "actions",
     "squat_state_out",
@@ -46,7 +46,7 @@ JOINT_ALIASES = {
     "Left_Shoulder_Pitch": "ALeft_Shoulder_Pitch",
     "Right_Shoulder_Pitch": "ARight_Shoulder_Pitch",
 }
-HEAD_ACTION_SCALE_MULTIPLIER = 0.1
+HEAD_JOINT_NAMES = ("Head_Yaw", "Head_Pitch")
 
 
 def _csv(metadata: dict[str, str], key: str) -> list[str]:
@@ -84,14 +84,31 @@ class SquatPolicy(Policy):
         )
         self.default_joint_pos = _float_csv(self.metadata, "default_joint_pos")
         self.action_scale = _float_csv(self.metadata, "action_scale")
-        for joint_name in ("Head_Yaw", "Head_Pitch"):
-            self.action_scale[self.policy_joint_names.index(joint_name)] *= (
-                HEAD_ACTION_SCALE_MULTIPLIER
-            )
         self.policy_to_robot = np.asarray(
             [
                 self.robot.cfg.joint_names.index(JOINT_ALIASES.get(name, name))
                 for name in self.policy_joint_names
+            ],
+            dtype=np.int64,
+        )
+        self.action_joint_names = [
+            name for name in self.policy_joint_names if name not in HEAD_JOINT_NAMES
+        ]
+        self.action_to_policy = np.asarray(
+            [self.policy_joint_names.index(name) for name in self.action_joint_names],
+            dtype=np.int64,
+        )
+        self.action_to_robot = np.asarray(
+            [
+                self.robot.cfg.joint_names.index(JOINT_ALIASES.get(name, name))
+                for name in self.action_joint_names
+            ],
+            dtype=np.int64,
+        )
+        self.head_robot_indices = np.asarray(
+            [
+                self.robot.cfg.joint_names.index(JOINT_ALIASES[name])
+                for name in HEAD_JOINT_NAMES
             ],
             dtype=np.int64,
         )
@@ -148,8 +165,10 @@ class SquatPolicy(Policy):
         self.robot.joint_damping = torch.from_numpy(
             _float_csv(self.metadata, "joint_damping")
         )
-        if self.action_scale.shape != (self.robot.num_joints,):
-            raise ValueError("Squat ONNX action scale must contain 22 values")
+        if self.action_scale.shape != (len(self.action_joint_names),):
+            raise ValueError(
+                "Squat ONNX action scale must match the 20 non-head joints"
+            )
 
     def _apply_gain_overrides(self) -> None:
         if self.cfg.gain_overrides_path is None:
@@ -190,7 +209,7 @@ class SquatPolicy(Policy):
 
     def reset(self) -> None:
         self.squat_state = np.asarray([[0, 0, 1]], dtype=np.int64)
-        self.last_action = np.zeros((22,), dtype=np.float32)
+        self.last_action = np.zeros((len(self.action_joint_names),), dtype=np.float32)
         self.init_root_yaw_quat_w_inv = lab_math.quat_inv(
             lab_math.yaw_quat(self.robot.data.root_quat_w)
         )
@@ -322,9 +341,11 @@ class SquatPolicy(Policy):
                 self.controller.stop()
 
         self.last_action = action.copy()
-        policy_targets = self.default_joint_pos + self.action_scale * action
+        action_defaults = self.default_joint_pos[self.action_to_policy]
+        policy_targets = action_defaults + self.action_scale * action
         robot_targets = self.robot.default_joint_pos.clone()
-        robot_targets[self.policy_to_robot] = torch.from_numpy(policy_targets)
+        robot_targets[self.action_to_robot] = torch.from_numpy(policy_targets)
+        robot_targets[self.head_robot_indices] = 0.0
         return robot_targets
 
     def is_standing_reference(self) -> bool:
@@ -343,7 +364,7 @@ class SquatPolicyCfg(PolicyCfg):
 class K1SquatControllerCfg(ControllerCfg):
     robot = K1_CFG
     policy: SquatPolicyCfg = SquatPolicyCfg(
-        checkpoint_path="models/squat.onnx",
+        checkpoint_path="models/sitdown.onnx",
     )
     mujoco = MujocoControllerCfg(
         init_pos=[0.0, 0.0, 0.518],
