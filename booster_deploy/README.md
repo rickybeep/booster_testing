@@ -67,7 +67,7 @@ both learned policies.
 The left stick commands forward/backward and lateral velocity; horizontal
 movement of the right stick commands yaw. The left-stick translational vector
 is zero inside a radial `0.1` stick dead zone. Outside it, nonzero translation
-is constrained to `0.2–0.75 m/s`, including diagonal input. Yaw reaches
+is constrained to `0.2–1.0 m/s`, including diagonal input. Yaw reaches
 `1.5 rad/s` at full right-stick deflection. After learned walking is active,
 press controller B (or keyboard `s`) to switch to the squat policy and crouch.
 Press it again to stand; once the measured standing pose is restored, walking
@@ -75,9 +75,9 @@ resumes with freshly seeded history. In MuJoCo, the gait command stays zero and
 keyboard `s` controls the same policy switch.
 
 While learned walking is active, the D-pad controls the head independently of
-the gait: left/right step yaw and up/down step pitch by `0.1 rad` per press.
-Targets remain latched and are clamped to the K1 joint limits (yaw `±1.0 rad`,
-pitch `-0.349–0.855 rad`). Positive pitch looks down.
+the gait: hold left/right for yaw and up/down for pitch. The target moves at
+`0.8 rad/s`, remains latched when released, and is clamped to the K1 joint
+limits (yaw `±1.0 rad`, pitch `-0.349–0.855 rad`). Positive pitch looks down.
 
 Policy inference runs in a worker process while ROS subscription and
 publication remain in the parent process. Leaving WALK/CUSTOM stops low-level
@@ -95,7 +95,7 @@ the default pose (22), joint velocities (22), and the previous action (22).
 Like Maelstrom's history-stacked gait wrapper, the first frame fills every
 history slot; subsequent steps discard the oldest frame and append the newest.
 Head position and velocity observations are masked to zero. Velocity commands
-are constrained to a nonzero translational magnitude of `0.2–0.75 m/s` before
+are constrained to a nonzero translational magnitude of `0.2–1.0 m/s` before
 inference; an exact zero remains zero. The model still produces 22 actions, but
 its two head targets are overwritten with the latched D-pad angles during walk
 inference. The squat policy retains control of the head while it is active.

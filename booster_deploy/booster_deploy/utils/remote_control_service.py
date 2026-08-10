@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import atexit
+from collections.abc import Callable
 import select
 import sys
 import termios
 import threading
+import time
 import tty
 
 
@@ -12,7 +14,8 @@ JOYSTICK_DEAD_ZONE = 0.1
 MIN_TRANSLATIONAL_SPEED = 0.2
 MAX_TRANSLATIONAL_SPEED = 0.75
 MAX_YAW = 1.5
-HEAD_ANGLE_STEP = 0.1
+HEAD_ANGULAR_SPEED = 0.8
+MAX_HEAD_UPDATE_DT = 0.1
 HEAD_YAW_LIMIT = 1.0
 HEAD_PITCH_MIN = -0.349
 HEAD_PITCH_MAX = 0.855
@@ -26,9 +29,11 @@ class RemoteControlService:
         *,
         controller_available: bool = False,
         workflow_controls: bool = False,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.controller_available = controller_available
         self.workflow_controls = workflow_controls
+        self._clock = clock
         self._lock = threading.Lock()
         self._running = True
         self._custom_mode_requested = False
@@ -40,7 +45,7 @@ class RemoteControlService:
         self._crouch_requests = 0
         self._velocity_command = (0.0, 0.0, 0.0)
         self._head_target = (0.0, 0.0)
-        self._dpad_pressed = (False, False, False, False)
+        self._last_controller_time: float | None = None
         self._stdin_tty = False
         self._old_termios = None
         self.keyboard_runner = None
@@ -194,19 +199,25 @@ class RemoteControlService:
                 bool(getattr(msg, name, False))
                 for name in ("hat_d", "hat_ld", "hat_rd")
             )
-            dpad_pressed = (dpad_left, dpad_right, dpad_up, dpad_down)
-            previous_dpad = self._dpad_pressed
+            now = self._clock()
+            if self._last_controller_time is None:
+                head_dt = 0.0
+            else:
+                head_dt = min(
+                    max(now - self._last_controller_time, 0.0),
+                    MAX_HEAD_UPDATE_DT,
+                )
+            self._last_controller_time = now
             head_yaw, head_pitch = self._head_target
-            if dpad_left and not previous_dpad[0]:
-                head_yaw = min(head_yaw + HEAD_ANGLE_STEP, HEAD_YAW_LIMIT)
-            if dpad_right and not previous_dpad[1]:
-                head_yaw = max(head_yaw - HEAD_ANGLE_STEP, -HEAD_YAW_LIMIT)
-            if dpad_up and not previous_dpad[2]:
-                head_pitch = max(head_pitch - HEAD_ANGLE_STEP, HEAD_PITCH_MIN)
-            if dpad_down and not previous_dpad[3]:
-                head_pitch = min(head_pitch + HEAD_ANGLE_STEP, HEAD_PITCH_MAX)
+            head_yaw += (
+                float(dpad_left) - float(dpad_right)
+            ) * HEAD_ANGULAR_SPEED * head_dt
+            head_pitch += (
+                float(dpad_down) - float(dpad_up)
+            ) * HEAD_ANGULAR_SPEED * head_dt
+            head_yaw = min(max(head_yaw, -HEAD_YAW_LIMIT), HEAD_YAW_LIMIT)
+            head_pitch = min(max(head_pitch, HEAD_PITCH_MIN), HEAD_PITCH_MAX)
             self._head_target = (head_yaw, head_pitch)
-            self._dpad_pressed = dpad_pressed
 
             if a_pressed and not self._controller_a_pressed:
                 self._custom_mode_requested = True

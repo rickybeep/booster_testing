@@ -10,6 +10,7 @@ from booster_deploy.robots.booster import K1_CFG
 from tasks.walk.walk import (
     HISTORY_FRAME_SIZE,
     HISTORY_LENGTH,
+    MAX_TRANSLATIONAL_SPEED,
     WalkPolicy,
     WalkPolicyCfg,
 )
@@ -83,7 +84,9 @@ class WalkPolicyTest(unittest.TestCase):
         command = inputs["instant"]
         self.assertEqual(command.dtype, np.float32)
         expected_translation = np.asarray([3.05, -2.0], dtype=np.float32)
-        expected_translation *= 0.75 / np.linalg.norm(expected_translation)
+        expected_translation *= MAX_TRANSLATIONAL_SPEED / np.linalg.norm(
+            expected_translation
+        )
         np.testing.assert_allclose(
             command,
             np.asarray(

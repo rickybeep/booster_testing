@@ -60,28 +60,44 @@ class RemoteControlServiceTest(unittest.TestCase):
         )
         self.assertEqual(service.get_velocity_command(), (0.2, -0.0, -0.0))
 
-    def test_dpad_steps_and_latches_head_angles_on_rising_edges(self) -> None:
-        service = RemoteControlService(controller_available=True)
+    def test_holding_dpad_moves_and_latches_head_angles(self) -> None:
+        now = [0.0]
+        service = RemoteControlService(
+            controller_available=True,
+            clock=lambda: now[0],
+        )
         self.addCleanup(service.close)
 
         service.handle_controller_state(
-            SimpleNamespace(a=False, b=False, hat_l=True)
+            SimpleNamespace(a=False, b=False)
         )
-        self.assertEqual(service.get_head_target(), (0.1, 0.0))
+        now[0] = 0.1
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, hat_l=True)
         )
-        self.assertEqual(service.get_head_target(), (0.1, 0.0))
+        yaw, pitch = service.get_head_target()
+        self.assertAlmostEqual(yaw, 0.08)
+        self.assertAlmostEqual(pitch, 0.0)
+        now[0] = 0.2
+        service.handle_controller_state(
+            SimpleNamespace(a=False, b=False, hat_l=True)
+        )
+        yaw, pitch = service.get_head_target()
+        self.assertAlmostEqual(yaw, 0.16)
+        self.assertAlmostEqual(pitch, 0.0)
 
+        now[0] = 0.3
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, hat_l=False)
         )
+        self.assertAlmostEqual(service.get_head_target()[0], 0.16)
+        now[0] = 0.4
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, hat_ru=True)
         )
         yaw, pitch = service.get_head_target()
-        self.assertAlmostEqual(yaw, 0.0)
-        self.assertAlmostEqual(pitch, -0.1)
+        self.assertAlmostEqual(yaw, 0.08)
+        self.assertAlmostEqual(pitch, -0.08)
 
 
 if __name__ == "__main__":
