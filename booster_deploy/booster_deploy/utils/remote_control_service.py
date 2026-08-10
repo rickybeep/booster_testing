@@ -8,8 +8,12 @@ import threading
 import tty
 
 
+MAX_TRANSLATIONAL_SPEED = 0.75
+MAX_YAW = 1.5
+
+
 class RemoteControlService:
-    """Track the ROS controller and keyboard controls used by the squat task."""
+    """Track joystick gait commands and walk/squat button edges."""
 
     def __init__(
         self,
@@ -28,6 +32,7 @@ class RemoteControlService:
         self._controller_a_pressed = False
         self._controller_b_pressed = False
         self._crouch_requests = 0
+        self._velocity_command = (0.0, 0.0, 0.0)
         self._stdin_tty = False
         self._old_termios = None
         self.keyboard_runner = None
@@ -39,10 +44,10 @@ class RemoteControlService:
         if self.workflow_controls:
             if self.controller_available:
                 return (
-                    "Press controller B or keyboard 's' to crouch/stand. "
-                    "Crouch is accepted only while walking."
+                    "Press controller B or keyboard 's' to enable learned walking, "
+                    "then use the left joystick. Press B again to squat."
                 )
-            return "Press keyboard 's' to crouch/stand while walking."
+            return "Press keyboard 's' to enable learned walking, then to squat."
         if self.controller_available:
             return "Press controller B or keyboard 's' to toggle squat on/off."
         return "Press keyboard 's' to toggle squat on/off."
@@ -57,8 +62,11 @@ class RemoteControlService:
         if self.controller_available:
             if real_robot and self.workflow_controls:
                 controls = (
-                    "  Controller B / keyboard s  Crouch, then stand",
-                    "  PREP/DAMP                   No deployment action",
+                    "  First controller B / s       Enable learned walk and enter CUSTOM",
+                    "  Left stick                   Walk (limited to 0.75 m/s)",
+                    "  Right stick horizontal       Turn",
+                    "  Later controller B / s       Squat, then stand and resume walk",
+                    "  PREP/DAMP                     No deployment action",
                 )
             elif real_robot:
                 controls = (
@@ -92,6 +100,10 @@ class RemoteControlService:
     def get_squat_enabled(self) -> bool:
         with self._lock:
             return self._squat_enabled
+
+    def get_velocity_command(self) -> tuple[float, float, float]:
+        with self._lock:
+            return self._velocity_command
 
     def consume_crouch_request(self) -> bool:
         """Consume one workflow button edge, if one is pending."""
@@ -133,6 +145,15 @@ class RemoteControlService:
         with self._lock:
             a_pressed = bool(msg.a)
             b_pressed = bool(msg.b)
+            vx = -float(getattr(msg, "ly", 0.0)) * MAX_TRANSLATIONAL_SPEED
+            vy = -float(getattr(msg, "lx", 0.0)) * MAX_TRANSLATIONAL_SPEED
+            speed = (vx * vx + vy * vy) ** 0.5
+            if speed > MAX_TRANSLATIONAL_SPEED:
+                scale = MAX_TRANSLATIONAL_SPEED / speed
+                vx *= scale
+                vy *= scale
+            yaw = -float(getattr(msg, "rx", 0.0)) * MAX_YAW
+            self._velocity_command = (vx, vy, yaw)
 
             if a_pressed and not self._controller_a_pressed:
                 self._custom_mode_requested = True

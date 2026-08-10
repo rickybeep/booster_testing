@@ -67,6 +67,7 @@ class PolicyCfg:
     constructor: Callable = MISSING
     checkpoint_path: str = MISSING
     enable_safety_fallback: bool = True
+    start_on_walking: bool = False
     device: str | torch.device = "cpu"
 
 

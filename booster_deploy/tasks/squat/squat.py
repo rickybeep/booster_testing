@@ -104,8 +104,15 @@ class SquatPolicy(Policy):
         )
         self._validate_robot_config()
         self._apply_gain_overrides()
+        self.joint_stiffness = self.robot.joint_stiffness.clone()
+        self.joint_damping = self.robot.joint_damping.clone()
         self.robot.data.to("cpu")
         self.reset()
+
+    def activate(self) -> None:
+        """Install the gains owned by this policy on the shared robot."""
+        self.robot.joint_stiffness = self.joint_stiffness.clone()
+        self.robot.joint_damping = self.joint_damping.clone()
 
     def _validate_model(self) -> None:
         inputs = {item.name: item for item in self.session.get_inputs()}

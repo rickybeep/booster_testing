@@ -18,7 +18,7 @@ from booster_sdk.client.booster import BoosterClient, RobotMode
 
 from .controller_cfg import ControllerCfg
 from .base_controller import BaseController, BoosterRobot
-from .booster_workflow import create_squat_workflow
+from .booster_workflow import create_squat_workflow, create_walk_squat_workflow
 from ..utils.synced_array import SyncedArray
 from ..utils.metrics import SyncedMetrics
 from ..utils.isaaclab import math as lab_math
@@ -97,18 +97,25 @@ class BoosterRobotPortal:
         self.low_cmd_publisher: rclpy.publisher.Publisher = None
         self.low_state_thread = None
         self.low_cmd_thread = None
+        self.current_mode = RobotMode.UNKNOWN
 
         rclpy.init()
         # Initialize communication. Callbacks may start immediately and
         # reference `is_running` and `exit_event`, so ensure those are set.
         self._init_communication()
-        self.current_mode = RobotMode.UNKNOWN
-        self.workflow = create_squat_workflow(
-            self,
-            walking_mode=RobotMode.WALKING,
-            custom_mode=RobotMode.CUSTOM,
-            standing_stable_ticks=self.cfg.booster.standing_stable_ticks,
-        )
+        if self.cfg.policy.start_on_walking:
+            self.workflow = create_walk_squat_workflow(
+                self,
+                walking_mode=RobotMode.WALKING,
+                custom_mode=RobotMode.CUSTOM,
+            )
+        else:
+            self.workflow = create_squat_workflow(
+                self,
+                walking_mode=RobotMode.WALKING,
+                custom_mode=RobotMode.CUSTOM,
+                standing_stable_ticks=self.cfg.booster.standing_stable_ticks,
+            )
 
     def _init_synced_buffer(self):
         action_dtype = np.dtype(
@@ -146,6 +153,7 @@ class BoosterRobotPortal:
         command_dtype = np.dtype(
             [
                 ("squat_enabled", np.bool_),
+                ("velocity", np.float32, (3,)),
             ]
         )
         self.synced_command = SyncedArray(
@@ -277,6 +285,10 @@ class BoosterRobotPortal:
             cmd[0]["squat_enabled"] = (
                 self.remoteControlService.get_squat_enabled()
             )
+            if self.current_mode == RobotMode.CUSTOM:
+                cmd[0]["velocity"] = (
+                    self.remoteControlService.get_velocity_command()
+                )
             self.synced_command.write(cmd)
 
         except Exception as e:
@@ -339,8 +351,8 @@ class BoosterRobotPortal:
         )
         self.low_cmd_thread.start()
 
-    def _reset_crouch_cycle(self) -> None:
-        """Clear every cross-process value owned by the previous cycle."""
+    def _reset_policy_session(self) -> None:
+        """Clear cross-process state before starting learned walking."""
         self._set_squat_command(False)
         self.inference_ready_event.clear()
         self.command_published_event.clear()
@@ -349,13 +361,13 @@ class BoosterRobotPortal:
         self._action_buf.fill(0)
         self.synced_action.write(self._action_buf)
 
-    def begin_squat(self) -> bool:
-        """Start by publishing the policy's safe standing command."""
+    def begin_policy(self) -> bool:
+        """Start learned walking with a zero velocity command."""
         if not self.low_state_ready_event.is_set():
             return False
         if self.inference_process is not None and self.inference_process.is_alive():
             return True
-        self._reset_crouch_cycle()
+        self._reset_policy_session()
         self.policy_stop_event.clear()
         self.inference_process = mp.Process(
             target=BoosterRobotPortal.inference_process_func,
@@ -366,7 +378,7 @@ class BoosterRobotPortal:
             daemon=True,
         )
         self.inference_process.start()
-        self.logger.info("Crouch requested in walking mode; policy starting")
+        self.logger.info("B pressed in Booster walking mode; learned walk policy starting")
         return True
 
     def policy_is_ready(self) -> bool:
@@ -382,23 +394,32 @@ class BoosterRobotPortal:
         )
 
     def enter_custom_mode(self) -> None:
-        self.logger.info("Standing policy ready; requesting custom mode")
+        self.logger.info("Learned walk command ready; requesting custom mode")
         self.client.change_mode(RobotMode.CUSTOM)
 
     def request_crouch(self) -> None:
+        self.squat_started_event.clear()
+        self.standing_pose_event.clear()
         self._set_squat_command(True)
-        self.logger.info("Custom mode confirmed; starting crouch")
+        self.logger.info("B pressed; switching from walk policy to squat policy")
 
     def request_stand(self) -> None:
         self._set_squat_command(False)
-        self.logger.info("Stand requested; waiting for policy and robot completion")
+        self.logger.info("B pressed; standing before resuming learned walking")
 
     def _set_squat_command(self, enabled: bool) -> None:
         """Update both command sources before the next inference frame."""
         self.remoteControlService.set_squat_enabled(enabled)
         command = np.zeros((1,), dtype=self.synced_command.dtype)
         command[0]["squat_enabled"] = enabled
+        if self.current_mode == RobotMode.CUSTOM:
+            command[0]["velocity"] = (
+                self.remoteControlService.get_velocity_command()
+            )
         self.synced_command.write(command)
+
+    def squat_is_commanded(self) -> bool:
+        return self.remoteControlService.get_squat_enabled()
 
     def squat_has_started(self) -> bool:
         return self.squat_started_event.is_set()
@@ -436,16 +457,19 @@ class BoosterRobotPortal:
             process.join(timeout=1.0)
         self.inference_process = None
 
+    def cancel_policy(self) -> None:
+        self._set_squat_command(False)
+        self._stop_inference()
+
     def finish_squat(self) -> None:
         self.logger.info("Robot is fully standing; returning to walking mode")
         self.client.change_mode(RobotMode.WALKING)
         self.current_mode = RobotMode.WALKING
-        self._set_squat_command(False)
-        self._stop_inference()
+        self.cancel_policy()
 
-    def cancel_squat(self) -> None:
-        self._set_squat_command(False)
-        self._stop_inference()
+    # Compatibility aliases for callers from the earlier squat-only workflow.
+    begin_squat = begin_policy
+    cancel_squat = cancel_policy
 
     def cleanup(self) -> None:
         """Clean up resources (idempotent)."""
@@ -506,7 +530,7 @@ class BoosterRobotPortal:
             )
 
     def run(self):
-        """Tick the mode-aware squat behaviour tree at 10 Hz."""
+        """Start learned walking and tick policy switches at 10 Hz."""
 
         print("Initialization complete.")
         print(self.remoteControlService.get_operation_hint())
@@ -522,7 +546,7 @@ class BoosterRobotPortal:
             time.sleep(0.1)
 
         # Shutdown never changes the robot's high-level mode implicitly.
-        self.cancel_squat()
+        self.cancel_policy()
 
     def __enter__(self) -> BoosterRobotPortal:
         return self
@@ -547,9 +571,10 @@ class BoosterRobotController(BaseController):
         super().__init__(cfg)
         self.portal = portal
 
-    def update_squat_command(self):
+    def update_policy_command(self):
         cmd = self.portal.synced_command.read()[0]
         self.squat_enabled = bool(cmd["squat_enabled"])
+        self.velocity_command = tuple(float(value) for value in cmd["velocity"])
 
     def update_state(self) -> None:
         state = self.portal.synced_state.read()[0]
@@ -594,7 +619,7 @@ class BoosterRobotController(BaseController):
 
     def run(self):
         self.update_state()
-        self.update_squat_command()
+        self.update_policy_command()
         self.start()
 
         next_inference_time = self.portal.timer.get_time()
@@ -608,16 +633,30 @@ class BoosterRobotController(BaseController):
             next_inference_time += self.cfg.policy_dt
 
             self.update_state()
-            self.update_squat_command()
+            self.update_policy_command()
             self.portal.metrics["policy_step"].mark()
             dof_targets = self.policy_step()
-            is_standing = bool(
-                getattr(self.policy, "is_standing_pose", lambda: False)()
-            )
-            if not is_standing:
+            policy_reports_started = getattr(
+                self.policy, "squat_has_started", lambda: False
+            )()
+            policy_reports_complete = getattr(
+                self.policy, "squat_cycle_complete", lambda: False
+            )()
+            is_standing = getattr(
+                self.policy, "is_standing_pose", lambda: False
+            )()
+            if policy_reports_complete:
+                self.portal.standing_pose_event.set()
+            elif policy_reports_started or (
+                self.squat_enabled and not is_standing
+            ):
                 self.portal.squat_started_event.set()
                 self.portal.standing_pose_event.clear()
-            elif self.portal.squat_started_event.is_set():
+            elif (
+                not self.squat_enabled
+                and self.portal.squat_started_event.is_set()
+                and is_standing
+            ):
                 self.portal.standing_pose_event.set()
             self.ctrl_step(dof_targets)
             if not first_command_published:

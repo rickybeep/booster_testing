@@ -1,9 +1,9 @@
-# Booster Squat Deploy
+# Booster Walk and Squat Deploy
 
-This repository deploys the toggle-controlled Booster K1 squat policy in
-MuJoCo or on a real robot. The ONNX model is a plain feed-forward policy:
-deployment builds its observation, appends the operator's binary squat command,
-and applies the returned joint position offsets.
+This repository deploys joystick-controlled learned walking and a
+toggle-controlled squat policy on the Booster K1, either in MuJoCo or on a real
+robot. Both policies remain loaded in one inference worker so switching does
+not interrupt the low-level ROS publisher.
 
 ## Install
 
@@ -41,7 +41,7 @@ to version `0.1.2-alpha.2` and installed by Pixi from PyPI.
 
 ## Run
 
-The sole task is `squat`, so it is selected when `--task` is omitted:
+The default task is `walk`:
 
 ```bash
 pixi run list-tasks
@@ -52,37 +52,50 @@ pixi run deploy
 Run `pixi run deploy` on the robot. MuJoCo deployment does not activate the ROS
 workspace and can be run on a development machine.
 
-`pixi run deploy --task squat` remains available for explicit selection.
+`pixi run deploy --task squat` remains available for running the squat model by
+itself.
 Use `--webots` with `deploy` when the ROS topics are provided by Webots.
 
-On the real robot, controller input arrives on
-`/remote_controller_state`. Deployment runs a `py_trees` workflow that observes
-the current high-level robot mode. In PREP, DAMP, or an unknown mode it sends no
-joint commands and requests no mode changes. While in WALK, press controller B
-(or keyboard `s`) to start the policy and enter CUSTOM mode for a crouch. The
-policy publishes its standing command during the mode transition and begins
-crouching only after the SDK confirms CUSTOM. Press the button
-again to stand. The workflow returns the firmware to WALK only after the
-measured hip pitch and knee pitch joints are back within
-`standing_joint_pos_tolerance` of the standing stance and measured joint
-velocities have remained below the configured settling tolerance for five
-workflow ticks.
-In MuJoCo, keyboard `s` retains the original immediate toggle behavior.
+On the real robot, controller input arrives on `/remote_controller_state`.
+Deployment observes the current high-level mode and remains inert in PREP,
+DAMP, or an unknown mode. It also remains in firmware WALK until controller B
+(or keyboard `s`) is pressed. That first press starts the learned walk policy
+with a zero velocity command. Deployment requests CUSTOM only after the first
+learned joint command has reached the ROS publisher, then stays in CUSTOM for
+both learned policies.
 
-The settling gate defaults to a maximum joint speed of `0.25` rad/s. This value
-and the five-tick settling window are configured by
-`BoosterRobotControllerCfg`.
+The left stick commands forward/backward and lateral velocity; horizontal
+movement of the right stick commands yaw. The left-stick translational vector
+is limited to `0.75 m/s`, including diagonal input; yaw reaches
+`1.5 rad/s` at full right-stick deflection. After learned walking is active,
+press controller B (or keyboard `s`) to switch to the squat policy and crouch.
+Press it again to stand; once the measured standing pose is restored, walking
+resumes with freshly seeded history. In MuJoCo, the gait command stays zero and
+keyboard `s` controls the same policy switch.
 
-Policy inference runs in a replaceable worker process, but ROS publication
-remains in the parent process. Each new crouch clears the prior command,
-action-ready handshake, completion flags, and shared action buffer before
-starting a freshly reset policy worker. This keeps repeated crouches from
-reusing middleware or policy state from the previous cycle.
+Policy inference runs in a worker process while ROS subscription and
+publication remain in the parent process. Leaving WALK/CUSTOM stops low-level
+inference and clears the publication handshake.
 
 MuJoCo initializes the robot at `MujocoControllerCfg.init_pos` with the default
 joint positions from the ONNX metadata.
 
-## ONNX contract
+## Walk ONNX contract
+
+`tasks/walk/models/walk.onnx` takes a `[1, 50, 72]` `history` input and a
+separate `[1, 3]` instantaneous velocity command. Each history frame contains
+base angular velocity (3), projected gravity (3), joint positions relative to
+the default pose (22), joint velocities (22), and the previous action (22).
+Like Maelstrom's history-stacked gait wrapper, the first frame fills every
+history slot; subsequent steps discard the oldest frame and append the newest.
+Head position and velocity observations are masked to zero. Velocity commands
+are limited to a translational magnitude of `0.75 m/s` before inference.
+
+The output is one `[1, 22]` action tensor. Joint targets are
+`default_joint_pos + action_scale * action`, with metadata providing the joint
+order, defaults, gains, and action scales.
+
+## Squat ONNX contract
 
 The model takes a single `[1, 73]` `obs` input and returns a single `[1, 22]`
 `actions` output. The observation is, in order, base angular velocity (3),
@@ -104,10 +117,10 @@ It stops the policy when the upright gravity projection drops below
 
 ## Gain overrides
 
-The ONNX metadata supplies the default deployment stiffness and damping. Task
-specific overrides are loaded from `tasks/squat/gain_overrides.json` and are
-applied by joint name on top of those defaults. The included override sets both
-ankle pitch and roll damping values to `2.0` on each leg.
+Each ONNX model supplies its default deployment stiffness and damping. Task
+specific overrides are loaded from the corresponding
+`tasks/<policy>/gain_overrides.json` and applied by joint name. Gains switch
+together with the active policy.
 
 Either section is optional:
 
@@ -132,6 +145,7 @@ pixi run lint
 pixi run ros-build
 ```
 
-The tracked policy artifact is `tasks/squat/models/squat.onnx`. Its metadata is
-validated at startup and is the source of truth for observation layout, joint
-order, default positions, gains, and action scaling.
+The tracked policy artifacts are `tasks/walk/models/walk.onnx` and
+`tasks/squat/models/squat.onnx`. Their metadata is validated at startup and is
+the source of truth for observation layout, joint order, default positions,
+gains, and action scaling.

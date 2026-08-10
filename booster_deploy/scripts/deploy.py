@@ -6,7 +6,7 @@ sys.path.append(".")
 parser = argparse.ArgumentParser()
 group = parser.add_mutually_exclusive_group()
 group.add_argument(
-    "--task", type=str, default="squat", help="Task name (default: squat)."
+    "--task", type=str, default="walk", help="Task name (default: walk)."
 )
 group.add_argument("-l", "--list", action="store_true", dest="list_tasks",
                    default=False, help="list available tasks")

@@ -3,7 +3,9 @@ from __future__ import annotations
 import unittest
 from enum import Enum
 
-from booster_deploy.controllers.booster_workflow import create_squat_workflow
+from booster_deploy.controllers.booster_workflow import (
+    create_walk_squat_workflow,
+)
 
 
 class Mode(Enum):
@@ -18,11 +20,9 @@ class FakeContext:
         self.current_mode = Mode.PREPARE
         self.requests = 0
         self.ready = False
-        self.started = False
-        self.reference_complete = False
-        self.measured_standing = False
-        self.calls: list[str] = []
         self.policy_started = False
+        self.squat_commanded = False
+        self.calls: list[str] = []
 
     def discard_crouch_request(self) -> None:
         self.requests = 0
@@ -34,7 +34,7 @@ class FakeContext:
         self.requests -= 1
         return True
 
-    def begin_squat(self) -> bool:
+    def begin_policy(self) -> bool:
         if not self.policy_started:
             self.calls.append("begin")
             self.policy_started = True
@@ -45,39 +45,30 @@ class FakeContext:
 
     def enter_custom_mode(self) -> None:
         self.calls.append("custom")
-        self.current_mode = Mode.CUSTOM
+
+    def squat_is_commanded(self) -> bool:
+        return self.squat_commanded
 
     def request_crouch(self) -> None:
+        self.squat_commanded = True
         self.calls.append("crouch")
 
     def request_stand(self) -> None:
+        self.squat_commanded = False
         self.calls.append("stand")
 
-    def squat_has_started(self) -> bool:
-        return self.started
-
-    def standing_pose_complete(self) -> bool:
-        return self.reference_complete
-
-    def robot_is_standing(self) -> bool:
-        return self.measured_standing
-
-    def finish_squat(self) -> None:
-        self.calls.append("walk")
-        self.current_mode = Mode.WALKING
-
-    def cancel_squat(self) -> None:
+    def cancel_policy(self) -> None:
+        self.policy_started = False
         self.calls.append("cancel")
 
 
-class SquatWorkflowTest(unittest.TestCase):
+class WalkSquatWorkflowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.context = FakeContext()
-        self.tree = create_squat_workflow(
+        self.tree = create_walk_squat_workflow(
             self.context,
             walking_mode=Mode.WALKING,
             custom_mode=Mode.CUSTOM,
-            standing_stable_ticks=3,
         )
 
     def tick(self, count: int = 1) -> None:
@@ -92,38 +83,52 @@ class SquatWorkflowTest(unittest.TestCase):
             self.assertEqual(self.context.requests, 0)
         self.assertNotIn("begin", self.context.calls)
         self.assertNotIn("custom", self.context.calls)
-        self.assertNotIn("walk", self.context.calls)
 
-    def test_full_cycle_waits_for_reference_and_measured_standing(self) -> None:
+    def test_walk_requires_b_before_starting_policy_and_requesting_custom(self) -> None:
         self.context.current_mode = Mode.WALKING
+        self.tick()
+        self.assertNotIn("begin", self.context.calls)
+        self.assertNotIn("custom", self.context.calls)
+
         self.context.requests = 1
         self.tick()
-        self.assertEqual(self.context.calls, ["begin"])
+        self.assertEqual(self.context.calls[-1], "begin")
+        self.assertNotIn("custom", self.context.calls)
 
         self.context.ready = True
         self.tick()
-        self.assertEqual(
-            self.context.calls[-3:], ["custom", "discard", "crouch"]
-        )
+        self.assertEqual(self.context.calls[-1], "custom")
 
-        self.context.started = True
+        self.context.current_mode = Mode.CUSTOM
+        self.tick()
+        self.assertEqual(self.context.calls[-1], "discard")
+
+    def test_b_toggles_squat_only_after_custom_is_confirmed(self) -> None:
+        self.context.current_mode = Mode.WALKING
+        self.context.ready = True
+        self.context.requests = 1
+        self.tick()
+        self.assertEqual(self.context.requests, 0)
+        self.assertEqual(self.context.calls[-1], "custom")
+
+        self.context.current_mode = Mode.CUSTOM
+        self.tick()
+        self.assertEqual(self.context.requests, 0)
+        self.assertNotIn("crouch", self.context.calls)
+
+        self.context.requests = 1
+        self.tick()
+        self.assertEqual(self.context.calls[-1], "crouch")
         self.context.requests = 1
         self.tick()
         self.assertEqual(self.context.calls[-1], "stand")
 
-        self.context.measured_standing = True
-        self.tick(5)
-        self.assertNotIn("walk", self.context.calls)
-
-        self.context.reference_complete = True
-        self.tick(2)
-        self.assertNotIn("walk", self.context.calls)
-        self.tick()
-        self.assertEqual(self.context.calls[-1], "walk")
-
-    def test_external_inactive_mode_cancels_active_cycle(self) -> None:
+    def test_external_inactive_mode_stops_policy(self) -> None:
         self.context.current_mode = Mode.WALKING
+        self.context.ready = True
         self.context.requests = 1
+        self.tick()
+        self.context.current_mode = Mode.CUSTOM
         self.tick()
         self.context.current_mode = Mode.DAMPING
         self.tick()

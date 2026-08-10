@@ -1,7 +1,7 @@
 [workspace]
 name = "booster-deploy"
 version = "0.2.0"
-description = "Stateful squat policy deployment for Booster K1"
+description = "Joystick walk and squat policy deployment for Booster K1"
 authors = ["Team whIRLwind"]
 channels = [
     "https://prefix.dev/conda-forge",
