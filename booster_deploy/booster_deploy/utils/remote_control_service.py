@@ -8,6 +8,8 @@ import threading
 import tty
 
 
+JOYSTICK_DEAD_ZONE = 0.1
+MIN_TRANSLATIONAL_SPEED = 0.2
 MAX_TRANSLATIONAL_SPEED = 0.75
 MAX_YAW = 1.5
 
@@ -63,7 +65,7 @@ class RemoteControlService:
             if real_robot and self.workflow_controls:
                 controls = (
                     "  First controller B / s       Enable learned walk and enter CUSTOM",
-                    "  Left stick                   Walk (limited to 0.75 m/s)",
+                    "  Left stick                   Walk (0.2-0.75 m/s outside dead zone)",
                     "  Right stick horizontal       Turn",
                     "  Later controller B / s       Squat, then stand and resume walk",
                     "  PREP/DAMP                     No deployment action",
@@ -145,13 +147,22 @@ class RemoteControlService:
         with self._lock:
             a_pressed = bool(msg.a)
             b_pressed = bool(msg.b)
-            vx = -float(getattr(msg, "ly", 0.0)) * MAX_TRANSLATIONAL_SPEED
-            vy = -float(getattr(msg, "lx", 0.0)) * MAX_TRANSLATIONAL_SPEED
-            speed = (vx * vx + vy * vy) ** 0.5
-            if speed > MAX_TRANSLATIONAL_SPEED:
-                scale = MAX_TRANSLATIONAL_SPEED / speed
-                vx *= scale
-                vy *= scale
+            direction_x = -float(getattr(msg, "ly", 0.0))
+            direction_y = -float(getattr(msg, "lx", 0.0))
+            stick_magnitude = (direction_x**2 + direction_y**2) ** 0.5
+            if stick_magnitude <= JOYSTICK_DEAD_ZONE:
+                vx = 0.0
+                vy = 0.0
+            else:
+                speed = min(
+                    max(
+                        stick_magnitude * MAX_TRANSLATIONAL_SPEED,
+                        MIN_TRANSLATIONAL_SPEED,
+                    ),
+                    MAX_TRANSLATIONAL_SPEED,
+                )
+                vx = direction_x / stick_magnitude * speed
+                vy = direction_y / stick_magnitude * speed
             yaw = -float(getattr(msg, "rx", 0.0)) * MAX_YAW
             self._velocity_command = (vx, vy, yaw)
 

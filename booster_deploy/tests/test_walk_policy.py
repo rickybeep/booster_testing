@@ -86,6 +86,24 @@ class WalkPolicyTest(unittest.TestCase):
             rtol=1e-6,
         )
 
+        self.controller.velocity_command = (0.05, 0.0, 0.0)
+        self.policy.inference()
+        inputs = self.session.inputs
+        assert inputs is not None
+        np.testing.assert_array_equal(
+            inputs["instant"],
+            np.asarray([[0.2, 0.0, 0.0]], dtype=np.float32),
+        )
+
+        self.controller.velocity_command = (0.0, 0.0, 0.0)
+        self.policy.inference()
+        inputs = self.session.inputs
+        assert inputs is not None
+        np.testing.assert_array_equal(
+            inputs["instant"],
+            np.zeros((1, 3), dtype=np.float32),
+        )
+
     def test_b_command_switches_to_squat_policy(self) -> None:
         walk_stiffness = self.policy.joint_stiffness.clone()
         self.controller.squat_enabled = True

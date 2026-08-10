@@ -25,6 +25,7 @@ OUTPUT_NAMES = ("actions",)
 HISTORY_LENGTH = 50
 HISTORY_FRAME_SIZE = 72
 COMMAND_SIZE = 3
+MIN_TRANSLATIONAL_SPEED = 0.2
 MAX_TRANSLATIONAL_SPEED = 0.75
 MAX_YAW_RATE = 1.5
 EXPECTED_OBSERVATIONS = (
@@ -139,9 +140,7 @@ class WalkPolicy(Policy):
         if not np.array_equal(history, expected_history):
             raise ValueError(f"Unexpected walk history layout: {history}")
         expected_flatten = np.asarray([0, 0, 0, 0, 0, 1], np.float32)
-        flatten = _float_csv(
-            self.metadata, "observation_terms_flatten_history_dim"
-        )
+        flatten = _float_csv(self.metadata, "observation_terms_flatten_history_dim")
         if not np.array_equal(flatten, expected_flatten):
             raise ValueError(f"Unexpected walk history flattening: {flatten}")
         clips = _csv(self.metadata, "observation_terms_clip")
@@ -209,9 +208,7 @@ class WalkPolicy(Policy):
 
     def reset(self) -> None:
         self.last_action = np.zeros((self.robot.num_joints,), dtype=np.float32)
-        self.history = np.zeros(
-            (HISTORY_LENGTH, HISTORY_FRAME_SIZE), dtype=np.float32
-        )
+        self.history = np.zeros((HISTORY_LENGTH, HISTORY_FRAME_SIZE), dtype=np.float32)
         self.history_initialized = False
         self.active_policy = "walk"
         self.squat_started = False
@@ -256,14 +253,14 @@ class WalkPolicy(Policy):
             self.history[:] = frame
             self.history_initialized = True
 
-        command = np.asarray(
-            self.controller.velocity_command, dtype=np.float32
-        ).copy()
+        command = np.asarray(self.controller.velocity_command, dtype=np.float32).copy()
         if command.shape != (COMMAND_SIZE,):
             raise RuntimeError(f"Built invalid walk command {command.shape}")
         translational_speed = float(np.linalg.norm(command[:2]))
         if translational_speed > MAX_TRANSLATIONAL_SPEED:
             command[:2] *= MAX_TRANSLATIONAL_SPEED / translational_speed
+        elif 0.0 < translational_speed < MIN_TRANSLATIONAL_SPEED:
+            command[:2] *= MIN_TRANSLATIONAL_SPEED / translational_speed
         command[2] = np.clip(command[2], -MAX_YAW_RATE, MAX_YAW_RATE)
         results = self.session.run(
             list(OUTPUT_NAMES),

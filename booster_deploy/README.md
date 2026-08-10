@@ -66,7 +66,8 @@ both learned policies.
 
 The left stick commands forward/backward and lateral velocity; horizontal
 movement of the right stick commands yaw. The left-stick translational vector
-is limited to `0.75 m/s`, including diagonal input; yaw reaches
+is zero inside a radial `0.1` stick dead zone. Outside it, nonzero translation
+is constrained to `0.2–0.75 m/s`, including diagonal input. Yaw reaches
 `1.5 rad/s` at full right-stick deflection. After learned walking is active,
 press controller B (or keyboard `s`) to switch to the squat policy and crouch.
 Press it again to stand; once the measured standing pose is restored, walking
@@ -89,7 +90,8 @@ the default pose (22), joint velocities (22), and the previous action (22).
 Like Maelstrom's history-stacked gait wrapper, the first frame fills every
 history slot; subsequent steps discard the oldest frame and append the newest.
 Head position and velocity observations are masked to zero. Velocity commands
-are limited to a translational magnitude of `0.75 m/s` before inference.
+are constrained to a nonzero translational magnitude of `0.2–0.75 m/s` before
+inference; an exact zero remains zero.
 
 The output is one `[1, 22]` action tensor. Joint targets are
 `default_joint_pos + action_scale * action`, with metadata providing the joint

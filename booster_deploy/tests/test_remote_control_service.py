@@ -48,7 +48,17 @@ class RemoteControlServiceTest(unittest.TestCase):
         service.handle_controller_state(
             SimpleNamespace(a=False, b=False, ly=1.0, lx=0.0, rx=0.0)
         )
-        self.assertEqual(service.get_velocity_command(), (-0.75, -0.0, -0.0))
+        self.assertEqual(service.get_velocity_command(), (-0.75, 0.0, -0.0))
+
+        service.handle_controller_state(
+            SimpleNamespace(a=False, b=False, ly=-0.05, lx=0.05, rx=0.0)
+        )
+        self.assertEqual(service.get_velocity_command(), (0.0, 0.0, -0.0))
+
+        service.handle_controller_state(
+            SimpleNamespace(a=False, b=False, ly=-0.2, lx=0.0, rx=0.0)
+        )
+        self.assertEqual(service.get_velocity_command(), (0.2, -0.0, -0.0))
 
 
 if __name__ == "__main__":
