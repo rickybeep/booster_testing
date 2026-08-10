@@ -129,7 +129,9 @@ It stops the policy when the upright gravity projection drops below
 Each ONNX model supplies its default deployment stiffness and damping. Task
 specific overrides are loaded from the corresponding
 `tasks/<policy>/gain_overrides.json` and applied by joint name. Gains switch
-together with the active policy.
+together with the active policy. The walk override raises both head joints from
+the model's stiffness of `4.0` to `8.0` for firmer D-pad tracking; the squat
+policy keeps its own gains.
 
 Either section is optional:
 

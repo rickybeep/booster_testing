@@ -1,5 +1,7 @@
 {
   "stiffness": {
+    "AAHead_yaw": 8.0,
+    "Head_pitch": 8.0,
     "Left_Ankle_Roll": 45.0,
     "Right_Ankle_Roll": 45.0
   },

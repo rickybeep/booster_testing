@@ -131,6 +131,8 @@ class WalkPolicyTest(unittest.TestCase):
         self.assertTrue(torch.equal(self.controller.robot.joint_stiffness, walk_stiffness))
 
     def test_walk_output_uses_manual_head_target(self) -> None:
+        self.assertEqual(float(self.policy.joint_stiffness[0]), 8.0)
+        self.assertEqual(float(self.policy.joint_stiffness[1]), 8.0)
         self.controller.head_target = (0.4, -0.2)
         targets = self.policy.inference()
         self.assertAlmostEqual(float(targets[0]), 0.4)
