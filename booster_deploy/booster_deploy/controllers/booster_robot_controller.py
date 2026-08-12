@@ -463,6 +463,18 @@ class BoosterRobotPortal:
     def cancel_policy(self) -> None:
         self._set_squat_command(False)
         self._stop_inference()
+        self._exit_custom_mode()
+
+    def _exit_custom_mode(self) -> None:
+        """Return firmware control to WALKING after learned CUSTOM control ends."""
+        if self.current_mode != RobotMode.CUSTOM:
+            return
+        try:
+            self.logger.info("Leaving custom mode; requesting walking mode")
+            self.client.change_mode(RobotMode.WALKING)
+            self.current_mode = RobotMode.WALKING
+        except Exception:
+            self.logger.exception("Failed to leave custom mode")
 
     def finish_squat(self) -> None:
         self.logger.info("Robot is fully standing; returning to walking mode")
@@ -486,6 +498,7 @@ class BoosterRobotPortal:
         self.is_running = False
         self.exit_event.set()
         self.policy_stop_event.set()
+        self._exit_custom_mode()
 
         # wait for inference process
         if (
@@ -548,7 +561,8 @@ class BoosterRobotPortal:
                 break
             time.sleep(0.1)
 
-        # Shutdown never changes the robot's high-level mode implicitly.
+        # Do not leave the robot in firmware CUSTOM mode after learned control
+        # has stopped, including Ctrl-C and workflow errors.
         self.cancel_policy()
 
     def __enter__(self) -> BoosterRobotPortal:
