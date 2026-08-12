@@ -71,8 +71,8 @@ is constrained to `0.2–1.0 m/s`, including diagonal input. Yaw reaches
 `1.5 rad/s` at full right-stick deflection. After learned walking is active,
 press controller B (or keyboard `s`) to switch to the squat policy and crouch.
 Press it again to stand; once the measured standing pose is restored, walking
-resumes with freshly seeded history. In MuJoCo, the gait command stays zero and
-keyboard `s` controls the same policy switch.
+resumes with a freshly reset policy state. In MuJoCo, the gait command stays
+zero and keyboard `s` controls the same policy switch.
 
 While learned walking is active, the D-pad controls the head independently of
 the gait: hold left/right for yaw and up/down for pitch. The target moves at
@@ -86,43 +86,12 @@ inference and clears the publication handshake.
 MuJoCo initializes the robot at `MujocoControllerCfg.init_pos` with the default
 joint positions from the ONNX metadata.
 
-## Walk ONNX contract
+## Policy models
 
-`tasks/walk/models/walk.onnx` takes a `[1, 50, 72]` `history` input and a
-separate `[1, 3]` instantaneous velocity command. Each history frame contains
-base angular velocity (3), projected gravity (3), joint positions relative to
-the default pose (22), joint velocities (22), and the previous action (22).
-Like Maelstrom's history-stacked gait wrapper, the first frame fills every
-history slot; subsequent steps discard the oldest frame and append the newest.
-Head position and velocity observations are masked to zero. Velocity commands
-are constrained to a nonzero translational magnitude of `0.2–1.0 m/s` before
-inference; an exact zero remains zero. The model still produces 22 actions, but
-its two head targets are overwritten with the latched D-pad angles during walk
-inference. The squat policy retains control of the head while it is active.
-
-The output is one `[1, 22]` action tensor. Joint targets are
-`default_joint_pos + action_scale * action`, with metadata providing the joint
-order, defaults, gains, and action scales.
-
-## Squat ONNX contract
-
-The model takes a single `[1, 73]` `obs` input and returns a single `[1, 22]`
-`actions` output. The observation is, in order, base angular velocity (3),
-projected gravity (3), joint positions relative to the default pose (22), joint
-velocities (22), the previous action (22), and the binary squat command (1).
-Actions are joint position offsets: targets are
-`default_joint_pos + action_scale * action`. Deployment scales the two head
-joints down to 10% of the trained action scale; the head does not contribute to
-balance and the full range is unnecessarily lively on hardware.
-
-The observation intentionally omits trunk translation and base linear velocity,
-so the same vector is built from signals available in both MuJoCo and on the
-real robot. Startup and policy reset only clear the previous action.
-
-The policy carries no internal trajectory, so the safety fallback compares the
-measured trunk orientation against vertical instead of against a reference pose.
-It stops the policy when the upright gravity projection drops below
-`min_upright_projection` (`0.5`, roughly 60 degrees of tilt).
+The gait and squat models are loaded from `tasks/walk/models/gait.onnx` and
+`tasks/squat/models/squat.onnx`. Both return 22 joint actions. Deployment owns
+the command handling, head override, and safety fallback; model metadata supplies
+the joint order, default pose, gains, and action scales.
 
 ## Gain overrides
 
@@ -156,7 +125,7 @@ pixi run lint
 pixi run ros-build
 ```
 
-The tracked policy artifacts are `tasks/walk/models/walk.onnx` and
+The tracked policy artifacts are `tasks/walk/models/gait.onnx` and
 `tasks/squat/models/squat.onnx`. Their metadata is validated at startup and is
 the source of truth for observation layout, joint order, default positions,
 gains, and action scaling.

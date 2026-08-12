@@ -8,9 +8,8 @@ import torch
 from booster_deploy.controllers.base_controller import BoosterRobot
 from booster_deploy.robots.booster import K1_CFG
 from tasks.walk.walk import (
-    HISTORY_FRAME_SIZE,
-    HISTORY_LENGTH,
     MAX_TRANSLATIONAL_SPEED,
+    OBSERVATION_SIZE,
     WalkPolicy,
     WalkPolicyCfg,
 )
@@ -47,13 +46,13 @@ class WalkPolicyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.controller = FakeController()
         self.policy = WalkPolicy(
-            WalkPolicyCfg(checkpoint_path="models/walk.onnx"),
+            WalkPolicyCfg(checkpoint_path="models/gait.onnx"),
             self.controller,
         )
         self.session = CapturingSession()
         self.policy.session = self.session
 
-    def test_history_is_seeded_then_slides_oldest_to_newest(self) -> None:
+    def test_observation_is_history_free_and_contains_current_state(self) -> None:
         self.controller.robot.data.joint_pos[0] = 0.7
         self.controller.robot.data.joint_pos[1] = -0.2
         self.controller.robot.data.joint_vel[0] = 1.0
@@ -61,27 +60,24 @@ class WalkPolicyTest(unittest.TestCase):
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
-        history = inputs["history"]
-        self.assertEqual(history.shape, (1, HISTORY_LENGTH, HISTORY_FRAME_SIZE))
-        np.testing.assert_array_equal(history[0], np.repeat(history[:, :1], 50, axis=1)[0])
-        np.testing.assert_array_equal(history[0, -1, 6:8], [0.0, 0.0])
-        np.testing.assert_array_equal(history[0, -1, 28:30], [0.0, 0.0])
+        observation = inputs["obs"]
+        self.assertEqual(observation.shape, (1, OBSERVATION_SIZE))
+        np.testing.assert_array_equal(observation[0, 6:8], [0.0, 0.0])
+        np.testing.assert_array_equal(observation[0, 28:30], [0.0, 0.0])
 
-        first_frame = history[0, -1].copy()
         self.controller.robot.data.root_ang_vel_b[0] = 1.0
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
-        history = inputs["history"]
-        np.testing.assert_array_equal(history[0, -2], first_frame)
-        self.assertEqual(history[0, -1, 0], 1.0)
+        observation = inputs["obs"]
+        self.assertEqual(observation[0, 0], 1.0)
 
-    def test_joystick_command_is_clipped_and_kept_float32(self) -> None:
+    def test_joystick_command_is_clipped_in_observation(self) -> None:
         self.controller.velocity_command = (3.05, -2.0, 4.0)
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
-        command = inputs["instant"]
+        command = inputs["obs"][0, -3:]
         self.assertEqual(command.dtype, np.float32)
         expected_translation = np.asarray([3.05, -2.0], dtype=np.float32)
         expected_translation *= MAX_TRANSLATIONAL_SPEED / np.linalg.norm(
@@ -89,10 +85,7 @@ class WalkPolicyTest(unittest.TestCase):
         )
         np.testing.assert_allclose(
             command,
-            np.asarray(
-                [[*expected_translation, 1.5]],
-                dtype=np.float32,
-            ),
+            np.asarray([*expected_translation, 1.5], dtype=np.float32),
             rtol=1e-6,
         )
 
@@ -101,8 +94,8 @@ class WalkPolicyTest(unittest.TestCase):
         inputs = self.session.inputs
         assert inputs is not None
         np.testing.assert_array_equal(
-            inputs["instant"],
-            np.asarray([[0.2, 0.0, 0.0]], dtype=np.float32),
+            inputs["obs"][0, -3:],
+            np.asarray([0.2, 0.0, 0.0], dtype=np.float32),
         )
 
         self.controller.velocity_command = (0.0, 0.0, 0.0)
@@ -110,8 +103,8 @@ class WalkPolicyTest(unittest.TestCase):
         inputs = self.session.inputs
         assert inputs is not None
         np.testing.assert_array_equal(
-            inputs["instant"],
-            np.zeros((1, 3), dtype=np.float32),
+            inputs["obs"][0, -3:],
+            np.zeros(3, dtype=np.float32),
         )
 
     def test_b_command_switches_to_squat_policy(self) -> None:

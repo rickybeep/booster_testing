@@ -20,10 +20,9 @@ from booster_deploy.utils.isaaclab.configclass import configclass
 from tasks.squat.squat import JOINT_ALIASES, SquatPolicy, SquatPolicyCfg
 
 
-INPUT_NAMES = ("history", "instant")
+INPUT_NAMES = ("obs",)
 OUTPUT_NAMES = ("actions",)
-HISTORY_LENGTH = 50
-HISTORY_FRAME_SIZE = 72
+OBSERVATION_SIZE = 75
 COMMAND_SIZE = 3
 MIN_TRANSLATIONAL_SPEED = 0.2
 MAX_TRANSLATIONAL_SPEED = 1.0
@@ -52,7 +51,7 @@ def _float_csv(metadata: dict[str, str], key: str) -> np.ndarray:
 
 
 class WalkPolicy(Policy):
-    """History-stacked joystick gait with an in-process squat policy."""
+    """History-free joystick gait with an in-process squat policy."""
 
     def __init__(self, cfg: WalkPolicyCfg, controller: BaseController):
         super().__init__(cfg, controller)
@@ -118,16 +117,10 @@ class WalkPolicy(Policy):
                 f"Walk ONNX actions must be [1, {self.robot.num_joints}], "
                 f"got {outputs['actions'].shape}"
             )
-        if inputs["history"].shape != [1, HISTORY_LENGTH, HISTORY_FRAME_SIZE]:
+        if inputs["obs"].shape != [1, OBSERVATION_SIZE]:
             raise ValueError(
-                "Walk ONNX history must be "
-                f"[1, {HISTORY_LENGTH}, {HISTORY_FRAME_SIZE}], "
-                f"got {inputs['history'].shape}"
-            )
-        if inputs["instant"].shape != [1, COMMAND_SIZE]:
-            raise ValueError(
-                f"Walk ONNX instant must be [1, {COMMAND_SIZE}], "
-                f"got {inputs['instant'].shape}"
+                f"Walk ONNX obs must be [1, {OBSERVATION_SIZE}], "
+                f"got {inputs['obs'].shape}"
             )
         if tuple(_csv(self.metadata, "observation_names")) != EXPECTED_OBSERVATIONS:
             raise ValueError("Unexpected walk observation layout")
@@ -135,14 +128,14 @@ class WalkPolicy(Policy):
             raise ValueError("Unexpected walk command layout")
         if not np.all(_float_csv(self.metadata, "observation_terms_scale") == 1.0):
             raise ValueError("Walk ONNX expects unscaled observations")
-        expected_history = np.asarray([50, 50, 50, 50, 50, 0], np.float32)
+        expected_history = np.zeros(6, dtype=np.float32)
         history = _float_csv(self.metadata, "observation_terms_history_length")
         if not np.array_equal(history, expected_history):
             raise ValueError(f"Unexpected walk history layout: {history}")
-        expected_flatten = np.asarray([0, 0, 0, 0, 0, 1], np.float32)
+        expected_flatten = np.ones(6, dtype=np.float32)
         flatten = _float_csv(self.metadata, "observation_terms_flatten_history_dim")
         if not np.array_equal(flatten, expected_flatten):
-            raise ValueError(f"Unexpected walk history flattening: {flatten}")
+            raise ValueError(f"Unexpected walk observation flattening: {flatten}")
         clips = _csv(self.metadata, "observation_terms_clip")
         if any(clip != "-inf;inf" for clip in clips):
             raise ValueError(f"Walk ONNX expects observation clipping: {clips}")
@@ -208,8 +201,6 @@ class WalkPolicy(Policy):
 
     def reset(self) -> None:
         self.last_action = np.zeros((self.robot.num_joints,), dtype=np.float32)
-        self.history = np.zeros((HISTORY_LENGTH, HISTORY_FRAME_SIZE), dtype=np.float32)
-        self.history_initialized = False
         self.active_policy = "walk"
         self.squat_started = False
         self.squat_complete = False
@@ -217,7 +208,7 @@ class WalkPolicy(Policy):
         self.squat_policy.reset()
         self._activate_walk()
 
-    def compute_history_frame(self) -> np.ndarray:
+    def compute_observation(self) -> np.ndarray:
         projected_gravity = lab_math.quat_apply_inverse(
             self.robot.data.root_quat_w,
             torch.tensor([0.0, 0.0, -1.0], dtype=torch.float32),
@@ -228,31 +219,24 @@ class WalkPolicy(Policy):
         joint_vel = joint_vel.copy()
 
         # Maelstrom's gait wrapper masks the head state while retaining all 22
-        # action slots expected by this particular exported model.
+        # action slots expected by this exported model.
         joint_pos[self.head_indices] = 0.0
         joint_vel[self.head_indices] = 0.0
-        frame = np.concatenate(
+        observation = np.concatenate(
             (
                 self.robot.data.root_ang_vel_b.cpu().numpy(),
                 projected_gravity.cpu().numpy(),
                 joint_pos,
                 joint_vel,
                 self.last_action,
+                self._command_observation(),
             )
         ).astype(np.float32, copy=False)
-        if frame.shape != (HISTORY_FRAME_SIZE,):
-            raise RuntimeError(f"Built invalid walk history frame {frame.shape}")
-        return frame
+        if observation.shape != (OBSERVATION_SIZE,):
+            raise RuntimeError(f"Built invalid walk observation {observation.shape}")
+        return observation
 
-    def _walk_inference(self) -> torch.Tensor:
-        frame = self.compute_history_frame()
-        if self.history_initialized:
-            self.history[:-1] = self.history[1:]
-            self.history[-1] = frame
-        else:
-            self.history[:] = frame
-            self.history_initialized = True
-
+    def _command_observation(self) -> np.ndarray:
         command = np.asarray(self.controller.velocity_command, dtype=np.float32).copy()
         if command.shape != (COMMAND_SIZE,):
             raise RuntimeError(f"Built invalid walk command {command.shape}")
@@ -262,14 +246,18 @@ class WalkPolicy(Policy):
         elif 0.0 < translational_speed < MIN_TRANSLATIONAL_SPEED:
             command[:2] *= MIN_TRANSLATIONAL_SPEED / translational_speed
         command[2] = np.clip(command[2], -MAX_YAW_RATE, MAX_YAW_RATE)
+        return command
+
+    def _walk_inference(self) -> torch.Tensor:
+        observation = self.compute_observation()
         results = self.session.run(
             list(OUTPUT_NAMES),
-            {"history": self.history[None, :], "instant": command[None, :]},
+            {"obs": observation[None, :]},
         )
         action = results[0][0].astype(np.float32, copy=False)
 
         if self.cfg.enable_safety_fallback:
-            upright = -float(frame[5])
+            upright = -float(observation[5])
             if upright < self.cfg.min_upright_projection:
                 print("\nLarge walk orientation error detected; stopping policy.")
                 self.controller.stop()
@@ -295,8 +283,6 @@ class WalkPolicy(Policy):
     def _resume_walk(self) -> None:
         self.active_policy = "walk"
         self.last_action.fill(0.0)
-        self.history.fill(0.0)
-        self.history_initialized = False
         self.return_to_walk = False
         self.squat_started = False
         self._activate_walk()
@@ -348,5 +334,5 @@ class WalkPolicyCfg(PolicyCfg):
 @configclass
 class K1WalkControllerCfg(ControllerCfg):
     robot = K1_CFG
-    policy: WalkPolicyCfg = WalkPolicyCfg(checkpoint_path="models/walk.onnx")
+    policy: WalkPolicyCfg = WalkPolicyCfg(checkpoint_path="models/gait.onnx")
     mujoco = MujocoControllerCfg(init_pos=[0.0, 0.0, 0.518])
