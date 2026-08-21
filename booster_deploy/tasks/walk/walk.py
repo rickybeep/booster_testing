@@ -20,20 +20,19 @@ from booster_deploy.utils.isaaclab.configclass import configclass
 from tasks.squat.squat import JOINT_ALIASES, SquatPolicy, SquatPolicyCfg
 
 
-INPUT_NAMES = ("obs",)
+INPUT_NAMES = ("history", "instant")
 OUTPUT_NAMES = ("actions",)
-OBSERVATION_SIZE = 75
+HISTORY_LENGTH = 50
+OBSERVATION_SIZE = 72
 COMMAND_SIZE = 3
-MIN_TRANSLATIONAL_SPEED = 0.2
-MAX_TRANSLATIONAL_SPEED = 1.0
-MAX_YAW_RATE = 1.5
+MAX_TRANSLATIONAL_SPEED = 2.0
+MAX_YAW_RATE = 3.0
 EXPECTED_OBSERVATIONS = (
     "base_ang_vel",
     "projected_gravity",
     "joint_pos",
     "joint_vel",
     "actions",
-    "command",
 )
 EXPECTED_COMMANDS = ("twist",)
 HEAD_JOINTS = ("Head_Yaw", "Head_Pitch")
@@ -51,7 +50,7 @@ def _float_csv(metadata: dict[str, str], key: str) -> np.ndarray:
 
 
 class WalkPolicy(Policy):
-    """History-free joystick gait with an in-process squat policy."""
+    """History-encoder joystick gait with an in-process squat policy."""
 
     def __init__(self, cfg: WalkPolicyCfg, controller: BaseController):
         super().__init__(cfg, controller)
@@ -117,10 +116,16 @@ class WalkPolicy(Policy):
                 f"Walk ONNX actions must be [1, {self.robot.num_joints}], "
                 f"got {outputs['actions'].shape}"
             )
-        if inputs["obs"].shape != [1, OBSERVATION_SIZE]:
+        if inputs["history"].shape != [1, HISTORY_LENGTH, OBSERVATION_SIZE]:
             raise ValueError(
-                f"Walk ONNX obs must be [1, {OBSERVATION_SIZE}], "
-                f"got {inputs['obs'].shape}"
+                "Walk ONNX history must be "
+                f"[1, {HISTORY_LENGTH}, {OBSERVATION_SIZE}], "
+                f"got {inputs['history'].shape}"
+            )
+        if inputs["instant"].shape != [1, COMMAND_SIZE]:
+            raise ValueError(
+                f"Walk ONNX instant input must be [1, {COMMAND_SIZE}], "
+                f"got {inputs['instant'].shape}"
             )
         if tuple(_csv(self.metadata, "observation_names")) != EXPECTED_OBSERVATIONS:
             raise ValueError("Unexpected walk observation layout")
@@ -128,11 +133,11 @@ class WalkPolicy(Policy):
             raise ValueError("Unexpected walk command layout")
         if not np.all(_float_csv(self.metadata, "observation_terms_scale") == 1.0):
             raise ValueError("Walk ONNX expects unscaled observations")
-        expected_history = np.zeros(6, dtype=np.float32)
+        expected_history = np.full(5, HISTORY_LENGTH, dtype=np.float32)
         history = _float_csv(self.metadata, "observation_terms_history_length")
         if not np.array_equal(history, expected_history):
             raise ValueError(f"Unexpected walk history layout: {history}")
-        expected_flatten = np.ones(6, dtype=np.float32)
+        expected_flatten = np.zeros(5, dtype=np.float32)
         flatten = _float_csv(self.metadata, "observation_terms_flatten_history_dim")
         if not np.array_equal(flatten, expected_flatten):
             raise ValueError(f"Unexpected walk observation flattening: {flatten}")
@@ -201,6 +206,10 @@ class WalkPolicy(Policy):
 
     def reset(self) -> None:
         self.last_action = np.zeros((self.robot.num_joints,), dtype=np.float32)
+        self.observation_history = np.empty(
+            (HISTORY_LENGTH, OBSERVATION_SIZE), dtype=np.float32
+        )
+        self.history_initialized = False
         self.active_policy = "walk"
         self.squat_started = False
         self.squat_complete = False
@@ -229,7 +238,6 @@ class WalkPolicy(Policy):
                 joint_pos,
                 joint_vel,
                 self.last_action,
-                self._command_observation(),
             )
         ).astype(np.float32, copy=False)
         if observation.shape != (OBSERVATION_SIZE,):
@@ -240,19 +248,29 @@ class WalkPolicy(Policy):
         command = np.asarray(self.controller.velocity_command, dtype=np.float32).copy()
         if command.shape != (COMMAND_SIZE,):
             raise RuntimeError(f"Built invalid walk command {command.shape}")
-        translational_speed = float(np.linalg.norm(command[:2]))
-        if translational_speed > MAX_TRANSLATIONAL_SPEED:
-            command[:2] *= MAX_TRANSLATIONAL_SPEED / translational_speed
-        elif 0.0 < translational_speed < MIN_TRANSLATIONAL_SPEED:
-            command[:2] *= MIN_TRANSLATIONAL_SPEED / translational_speed
+        command[:2] = np.clip(
+            command[:2], -MAX_TRANSLATIONAL_SPEED, MAX_TRANSLATIONAL_SPEED
+        )
         command[2] = np.clip(command[2], -MAX_YAW_RATE, MAX_YAW_RATE)
         return command
 
+    def _push_history_frame(self, observation: np.ndarray) -> None:
+        if self.history_initialized:
+            self.observation_history[:-1] = self.observation_history[1:]
+            self.observation_history[-1] = observation
+        else:
+            self.observation_history[:] = observation
+            self.history_initialized = True
+
     def _walk_inference(self) -> torch.Tensor:
         observation = self.compute_observation()
+        self._push_history_frame(observation)
         results = self.session.run(
             list(OUTPUT_NAMES),
-            {"obs": observation[None, :]},
+            {
+                "history": self.observation_history[None, :, :],
+                "instant": self._command_observation()[None, :],
+            },
         )
         action = results[0][0].astype(np.float32, copy=False)
 
@@ -283,6 +301,7 @@ class WalkPolicy(Policy):
     def _resume_walk(self) -> None:
         self.active_policy = "walk"
         self.last_action.fill(0.0)
+        self.history_initialized = False
         self.return_to_walk = False
         self.squat_started = False
         self._activate_walk()
