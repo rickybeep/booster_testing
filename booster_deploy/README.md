@@ -67,7 +67,7 @@ both learned policies.
 The left stick commands forward/backward and lateral velocity; horizontal
 movement of the right stick commands yaw. The left-stick translational vector
 is zero inside a radial `0.1` stick dead zone. Outside it, nonzero translation
-is constrained to `0.2–1.0 m/s`, including diagonal input. Yaw reaches
+is constrained to `0.2–0.75 m/s`, including diagonal input. Yaw reaches
 `1.5 rad/s` at full right-stick deflection. After learned walking is active,
 press controller B (or keyboard `s`) to switch to the squat policy and crouch.
 Press it again to stand; once the measured standing pose is restored, walking
@@ -93,13 +93,17 @@ The gait and squat models are loaded from `tasks/walk/models/gait.onnx` and
 the command handling, head override, and safety fallback; model metadata supplies
 the joint order, default pose, gains, and action scales.
 
+The gait model consumes 50 chronological frames of 72-value proprioception and
+a separate instantaneous 3-value velocity command. After a reset, deployment
+fills the history with the first frame, matching the training environment.
+
 ## Gain overrides
 
 Each ONNX model supplies its default deployment stiffness and damping. Task
 specific overrides are loaded from the corresponding
 `tasks/<policy>/gain_overrides.json` and applied by joint name. Gains switch
 together with the active policy. The walk override raises both head joints from
-the model's stiffness of `4.0` to `8.0` for firmer D-pad tracking; the squat
+the model's stiffness of `4.0` to `10.0` for firmer D-pad tracking; the squat
 policy keeps its own gains.
 
 Either section is optional:
