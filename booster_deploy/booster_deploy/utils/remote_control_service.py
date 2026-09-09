@@ -6,6 +6,14 @@ import sys
 import termios
 import threading
 import tty
+from collections import deque
+
+# Button -> policy name. Each button requests a crouch cycle with its own
+# policy while walking; any button requests standing once a cycle is active.
+SQUAT_POLICY = "squat"
+KNEEL_POLICY = "kneel"
+KEYBOARD_POLICY_KEYS = {"s": SQUAT_POLICY, "m": KNEEL_POLICY}
+CONTROLLER_POLICY_BUTTONS = {"b": SQUAT_POLICY, "x": KNEEL_POLICY}
 
 
 class RemoteControlService:
@@ -27,7 +35,8 @@ class RemoteControlService:
         self._suppress_toggle_until_release = False
         self._controller_a_pressed = False
         self._controller_b_pressed = False
-        self._crouch_requests = 0
+        self._controller_pressed = {button: False for button in CONTROLLER_POLICY_BUTTONS}
+        self._crouch_requests: deque[str] = deque()
         self._stdin_tty = False
         self._old_termios = None
         self.keyboard_runner = None
@@ -39,13 +48,18 @@ class RemoteControlService:
         if self.workflow_controls:
             if self.controller_available:
                 return (
-                    "Press controller B or keyboard 's' to crouch/stand. "
+                    "Press controller B or keyboard 's' to crouch with the squat "
+                    "policy, controller X or keyboard 'm' to crouch with the "
+                    "kneel policy; press either to stand. "
                     "Crouch is accepted only while walking."
                 )
-            return "Press keyboard 's' to crouch/stand while walking."
+            return (
+                "Press keyboard 's' (squat) or 'm' (kneel) to "
+                "crouch/stand while walking."
+            )
         if self.controller_available:
-            return "Press controller B or keyboard 's' to toggle squat on/off."
-        return "Press keyboard 's' to toggle squat on/off."
+            return "Press controller B/X or keyboard 's'/'m' to toggle squat on/off."
+        return "Press keyboard 's' or 'm' to toggle squat on/off."
 
     def get_custom_mode_operation_hint(self) -> str:
         if self.controller_available:
@@ -57,7 +71,8 @@ class RemoteControlService:
         if self.controller_available:
             if real_robot and self.workflow_controls:
                 controls = (
-                    "  Controller B / keyboard s  Crouch, then stand",
+                    "  Controller B / keyboard s  Crouch (squat policy), then stand",
+                    "  Controller X / keyboard m  Crouch (kneel), then stand",
                     "  PREP/DAMP                   No deployment action",
                 )
             elif real_robot:
@@ -66,14 +81,14 @@ class RemoteControlService:
                     "  Controller B / keyboard s  Toggle squat after policy startup",
                 )
             else:
-                controls = ("  Controller B / keyboard s  Toggle squat on/off",)
+                controls = ("  Controller B/X / keyboard s/m  Toggle squat on/off",)
         elif real_robot:
             controls = (
                 "  x  Enter custom mode and start policy",
                 "  s  Toggle squat after policy startup",
             )
         else:
-            controls = ("  s  Toggle squat on/off",)
+            controls = ("  s / m  Toggle squat on/off",)
 
         print("\nControls:")
         print("\n".join(controls))
@@ -93,26 +108,28 @@ class RemoteControlService:
         with self._lock:
             return self._squat_enabled
 
-    def consume_crouch_request(self) -> bool:
-        """Consume one workflow button edge, if one is pending."""
+    def consume_crouch_request(self) -> str | None:
+        """Consume one workflow button edge, if one is pending.
+
+        Returns the policy name the pressed button maps to, or None.
+        """
         with self._lock:
-            if self._crouch_requests == 0:
-                return False
-            self._crouch_requests -= 1
-            return True
+            if not self._crouch_requests:
+                return None
+            return self._crouch_requests.popleft()
 
     def discard_crouch_requests(self) -> None:
         with self._lock:
-            self._crouch_requests = 0
+            self._crouch_requests.clear()
 
     def set_squat_enabled(self, enabled: bool) -> None:
         with self._lock:
             self._squat_enabled = enabled
 
-    def _toggle_squat(self) -> None:
+    def _toggle_squat(self, policy: str = SQUAT_POLICY) -> None:
         with self._lock:
             if self.workflow_controls:
-                self._crouch_requests += 1
+                self._crouch_requests.append(policy)
                 return
             if not self._toggle_armed:
                 return
@@ -124,35 +141,35 @@ class RemoteControlService:
         with self._lock:
             if key == "x":
                 self._custom_mode_requested = True
-        if key == "s":
-            self._toggle_squat()
+        policy = KEYBOARD_POLICY_KEYS.get(key)
+        if policy is not None:
+            self._toggle_squat(policy)
 
     def handle_controller_state(self, msg) -> None:
         """Handle a `/remote_controller_state` snapshot using rising edges."""
         squat_state = None
         with self._lock:
             a_pressed = bool(msg.a)
-            b_pressed = bool(msg.b)
-
             if a_pressed and not self._controller_a_pressed:
                 self._custom_mode_requested = True
-
-            if not b_pressed:
-                self._suppress_toggle_until_release = False
-            elif (
-                not self._controller_b_pressed
-                and not self._suppress_toggle_until_release
-            ):
-                if self.workflow_controls:
-                    self._crouch_requests += 1
-                elif self._toggle_armed:
-                    self._squat_enabled = not self._squat_enabled
-                    squat_state = (
-                        "enabled" if self._squat_enabled else "disabled"
-                    )
-
             self._controller_a_pressed = a_pressed
-            self._controller_b_pressed = b_pressed
+
+            for button, policy in CONTROLLER_POLICY_BUTTONS.items():
+                pressed = bool(getattr(msg, button, False))
+                was_pressed = self._controller_pressed[button]
+                suppressed = button == "b" and self._suppress_toggle_until_release
+                if button == "b" and not pressed:
+                    self._suppress_toggle_until_release = False
+                if pressed and not was_pressed and not suppressed:
+                    if self.workflow_controls:
+                        self._crouch_requests.append(policy)
+                    elif self._toggle_armed:
+                        self._squat_enabled = not self._squat_enabled
+                        squat_state = (
+                            "enabled" if self._squat_enabled else "disabled"
+                        )
+                self._controller_pressed[button] = pressed
+            self._controller_b_pressed = self._controller_pressed["b"]
 
         if squat_state is not None:
             print(f"Squat {squat_state}")

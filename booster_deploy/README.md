@@ -1,9 +1,14 @@
 # Booster Squat Deploy
 
 This repository deploys the toggle-controlled Booster K1 squat policy in
-MuJoCo or on a real robot. The ONNX model is a plain feed-forward policy:
-deployment builds its observation, appends the operator's binary squat command,
-and applies the returned joint position offsets.
+MuJoCo or on a real robot. The primary ONNX model is a plain feed-forward
+policy: deployment builds its observation, appends the operator's binary squat
+command, and applies the returned joint position offsets.
+
+A second, kneel (motion-tracking) policy (`tasks/squat/kneel.py`,
+`models/kneel.onnx`) is available as an alternate. On the real robot the
+controller button pressed selects which policy runs a crouch cycle; in MuJoCo
+it is chosen with `--policy kneel`.
 
 ## Install
 
@@ -54,20 +59,26 @@ workspace and can be run on a development machine.
 
 `pixi run deploy --task squat` remains available for explicit selection.
 Use `--webots` with `deploy` when the ROS topics are provided by Webots.
+In MuJoCo, `pixi run deploy-mujoco --policy kneel` runs the
+kneel policy instead of the default squat policy; `--list` prints the
+policy names each task offers.
 
 On the real robot, controller input arrives on
 `/remote_controller_state`. Deployment runs a `py_trees` workflow that observes
 the current high-level robot mode. In PREP, DAMP, or an unknown mode it sends no
 joint commands and requests no mode changes. While in WALK, press controller B
-(or keyboard `s`) to start the policy and enter CUSTOM mode for a crouch. The
-policy publishes its standing command during the mode transition and begins
-crouching only after the SDK confirms CUSTOM. Press the button
-again to stand. The workflow returns the firmware to WALK only after the
-measured hip pitch and knee pitch joints are back within
-`standing_joint_pos_tolerance` of the standing stance and measured joint
-velocities have remained below the configured settling tolerance for five
-workflow ticks.
-In MuJoCo, keyboard `s` retains the original immediate toggle behavior.
+(or keyboard `s`) to start the squat policy, or controller X (or keyboard `m`)
+to start the kneel policy; either enters CUSTOM mode for a crouch.
+The policy publishes its standing command during the mode transition and begins
+crouching only after the SDK confirms CUSTOM. Press either button again to
+stand. The workflow returns the firmware to WALK only after the policy reports
+standing and measured joint velocities have remained below the configured
+settling tolerance for five workflow ticks. For the squat policy, standing means
+the measured hip pitch and knee pitch joints are back within
+`standing_joint_pos_tolerance` of the stance; for the kneel policy it
+means the ONNX trajectory state has returned to its standing sentinel.
+In MuJoCo, keyboard `s`/`m` retain the original immediate toggle behavior for
+whichever policy was selected at launch.
 
 The settling gate defaults to a maximum joint speed of `0.25` rad/s. This value
 and the five-tick settling window are configured by
@@ -102,6 +113,18 @@ measured trunk orientation against vertical instead of against a reference pose.
 It stops the policy when the upright gravity projection drops below
 `min_upright_projection` (`0.5`, roughly 60 degrees of tilt).
 
+## Kneel ONNX contract
+
+`models/kneel.onnx` is stateful. Its inputs are `obs` (`[1, 120]`),
+`squat_enabled`, and `squat_state_in` (`[1, 3]`); every call returns actions
+for the 20 non-head joints, `squat_state_out`, and the next reference arrays.
+Deployment feeds the returned state and references into the next control step
+without interpreting the state machine, holds both head joints at zero, and
+restores the standing state `[0, 0, 1]` plus the embedded frame-zero reference
+on reset. MuJoCo initializes the robot from that embedded reference and draws
+it as a ghost. This policy has no orientation safety fallback; it was ported
+as tested on the `sitdown-testing` branch.
+
 ## Gain overrides
 
 The ONNX metadata supplies the default deployment stiffness and damping. Task
@@ -123,7 +146,8 @@ Either section is optional:
 ```
 
 Set `gain_overrides_path` to `null` in the task policy configuration to disable
-file-based overrides.
+file-based overrides. The kneel policy applies no file overrides; it uses the
+gains embedded in its ONNX metadata.
 
 ## Development
 
@@ -132,6 +156,7 @@ pixi run lint
 pixi run ros-build
 ```
 
-The tracked policy artifact is `tasks/squat/models/squat.onnx`. Its metadata is
-validated at startup and is the source of truth for observation layout, joint
-order, default positions, gains, and action scaling.
+The tracked policy artifacts are `tasks/squat/models/squat.onnx` and
+`tasks/squat/models/kneel.onnx`. Their metadata is validated at startup and
+is the source of truth for observation layout, joint order, default positions,
+gains, and action scaling.

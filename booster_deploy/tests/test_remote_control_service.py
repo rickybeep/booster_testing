@@ -12,14 +12,34 @@ class RemoteControlServiceTest(unittest.TestCase):
         self.addCleanup(service.close)
 
         service._handle_keyboard_press("s")
-        self.assertTrue(service.consume_crouch_request())
-        self.assertFalse(service.consume_crouch_request())
+        self.assertEqual(service.consume_crouch_request(), "squat")
+        self.assertIsNone(service.consume_crouch_request())
         self.assertFalse(service.get_squat_enabled())
 
-        service.handle_controller_state(SimpleNamespace(a=False, b=True))
-        service.handle_controller_state(SimpleNamespace(a=False, b=True))
-        self.assertTrue(service.consume_crouch_request())
-        self.assertFalse(service.consume_crouch_request())
+        service.handle_controller_state(SimpleNamespace(a=False, b=True, x=False))
+        service.handle_controller_state(SimpleNamespace(a=False, b=True, x=False))
+        self.assertEqual(service.consume_crouch_request(), "squat")
+        self.assertIsNone(service.consume_crouch_request())
+
+    def test_kneel_button_and_key_request_that_policy(self) -> None:
+        service = RemoteControlService(workflow_controls=True)
+        self.addCleanup(service.close)
+
+        service._handle_keyboard_press("m")
+        self.assertEqual(service.consume_crouch_request(), "kneel")
+
+        service.handle_controller_state(SimpleNamespace(a=False, b=False, x=True))
+        service.handle_controller_state(SimpleNamespace(a=False, b=False, x=True))
+        service.handle_controller_state(SimpleNamespace(a=False, b=False, x=False))
+        self.assertEqual(service.consume_crouch_request(), "kneel")
+        self.assertIsNone(service.consume_crouch_request())
+
+        # Simultaneous edges are queued in a stable order.
+        service.handle_controller_state(SimpleNamespace(a=False, b=True, x=True))
+        self.assertEqual(service.consume_crouch_request(), "squat")
+        self.assertEqual(service.consume_crouch_request(), "kneel")
+        service.discard_crouch_requests()
+        self.assertIsNone(service.consume_crouch_request())
 
     def test_mujoco_toggle_behavior_is_unchanged(self) -> None:
         service = RemoteControlService()

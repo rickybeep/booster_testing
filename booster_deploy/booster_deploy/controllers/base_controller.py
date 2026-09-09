@@ -152,14 +152,15 @@ class BaseController:
     robot: BoosterRobot
     policy: Policy
 
-    def __init__(self, cfg: ControllerCfg) -> None:
+    def __init__(self, cfg: ControllerCfg, policy_name: str | None = None) -> None:
         self.cfg = cfg
         self._step_count: int = 0
         self._elapsed_s: float = 0.0
         self.is_running: bool = False
         self.squat_enabled: bool = False
         self.robot = BoosterRobot(cfg.robot)
-        self.policy = self.cfg.policy.constructor(self.cfg.policy, self)
+        policy_cfg = self.cfg.get_policy(policy_name)
+        self.policy = policy_cfg.constructor(policy_cfg, self)
 
     def start(self):
         """Begin a deployment session.

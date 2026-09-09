@@ -23,20 +23,21 @@ class FakeContext:
         self.measured_standing = False
         self.calls: list[str] = []
         self.policy_started = False
+        self.request_policy = "squat"
 
     def discard_crouch_request(self) -> None:
         self.requests = 0
         self.calls.append("discard")
 
-    def consume_crouch_request(self) -> bool:
+    def consume_crouch_request(self) -> str | None:
         if not self.requests:
-            return False
+            return None
         self.requests -= 1
-        return True
+        return self.request_policy
 
-    def begin_squat(self) -> bool:
+    def begin_squat(self, policy_name: str) -> bool:
         if not self.policy_started:
-            self.calls.append("begin")
+            self.calls.append(f"begin:{policy_name}")
             self.policy_started = True
         return True
 
@@ -90,7 +91,7 @@ class SquatWorkflowTest(unittest.TestCase):
             self.context.requests = 1
             self.tick()
             self.assertEqual(self.context.requests, 0)
-        self.assertNotIn("begin", self.context.calls)
+        self.assertNotIn("begin:squat", self.context.calls)
         self.assertNotIn("custom", self.context.calls)
         self.assertNotIn("walk", self.context.calls)
 
@@ -98,7 +99,7 @@ class SquatWorkflowTest(unittest.TestCase):
         self.context.current_mode = Mode.WALKING
         self.context.requests = 1
         self.tick()
-        self.assertEqual(self.context.calls, ["begin"])
+        self.assertEqual(self.context.calls, ["begin:squat"])
 
         self.context.ready = True
         self.tick()
@@ -120,6 +121,24 @@ class SquatWorkflowTest(unittest.TestCase):
         self.assertNotIn("walk", self.context.calls)
         self.tick()
         self.assertEqual(self.context.calls[-1], "walk")
+
+    def test_other_button_starts_kneel_and_any_button_stands(self) -> None:
+        self.context.current_mode = Mode.WALKING
+        self.context.request_policy = "kneel"
+        self.context.requests = 1
+        self.tick()
+        self.assertEqual(self.context.calls, ["begin:kneel"])
+
+        self.context.ready = True
+        self.tick()
+        self.assertEqual(self.context.calls[-1], "crouch")
+
+        # Standing is requested by whichever button is pressed next.
+        self.context.started = True
+        self.context.request_policy = "squat"
+        self.context.requests = 1
+        self.tick()
+        self.assertEqual(self.context.calls[-1], "stand")
 
     def test_external_inactive_mode_cancels_active_cycle(self) -> None:
         self.context.current_mode = Mode.WALKING

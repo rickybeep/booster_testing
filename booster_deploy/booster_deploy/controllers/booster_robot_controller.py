@@ -349,12 +349,14 @@ class BoosterRobotPortal:
         self._action_buf.fill(0)
         self.synced_action.write(self._action_buf)
 
-    def begin_squat(self) -> bool:
-        """Start by publishing the policy's safe standing command."""
+    def begin_squat(self, policy_name: str) -> bool:
+        """Start by publishing the selected policy's safe standing command."""
         if not self.low_state_ready_event.is_set():
             return False
         if self.inference_process is not None and self.inference_process.is_alive():
             return True
+        # Fail here, in the parent, rather than inside the worker process.
+        self.cfg.get_policy(policy_name)
         self._reset_crouch_cycle()
         self.policy_stop_event.clear()
         self.inference_process = mp.Process(
@@ -362,11 +364,14 @@ class BoosterRobotPortal:
             args=(
                 self.cfg,
                 self,
+                policy_name,
             ),
             daemon=True,
         )
         self.inference_process.start()
-        self.logger.info("Crouch requested in walking mode; policy starting")
+        self.logger.info(
+            "Crouch requested in walking mode; '%s' policy starting", policy_name
+        )
         return True
 
     def policy_is_ready(self) -> bool:
@@ -415,7 +420,7 @@ class BoosterRobotPortal:
             max_velocity <= self.cfg.booster.standing_joint_velocity_tolerance
         )
 
-    def consume_crouch_request(self) -> bool:
+    def consume_crouch_request(self) -> str | None:
         return self.remoteControlService.consume_crouch_request()
 
     def discard_crouch_request(self) -> None:
@@ -534,8 +539,9 @@ class BoosterRobotPortal:
     def inference_process_func(
         cfg: ControllerCfg,
         portal: BoosterRobotPortal,
+        policy_name: str,
     ) -> None:
-        BoosterRobotController(cfg, portal).run()
+        BoosterRobotController(cfg, portal, policy_name).run()
         portal.logger.info("Inference process stopped.")
 
 
@@ -543,8 +549,13 @@ class BoosterRobotController(BaseController):
     '''Controller for Booster robots. Note that this controller runs in a
     separate process forked by BoosterRobotPortal.
     '''
-    def __init__(self, cfg: ControllerCfg, portal: BoosterRobotPortal) -> None:
-        super().__init__(cfg)
+    def __init__(
+        self,
+        cfg: ControllerCfg,
+        portal: BoosterRobotPortal,
+        policy_name: str | None = None,
+    ) -> None:
+        super().__init__(cfg, policy_name)
         self.portal = portal
 
     def update_squat_command(self):

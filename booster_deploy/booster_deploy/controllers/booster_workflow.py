@@ -10,9 +10,11 @@ class SquatWorkflowContext(Protocol):
 
     def discard_crouch_request(self) -> None: ...
 
-    def consume_crouch_request(self) -> bool: ...
+    def consume_crouch_request(self) -> str | None:
+        """Pop a pending button edge; returns the policy name it maps to."""
+        ...
 
-    def begin_squat(self) -> bool: ...
+    def begin_squat(self, policy_name: str) -> bool: ...
 
     def policy_is_ready(self) -> bool: ...
 
@@ -48,28 +50,42 @@ class _InactiveMode(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.RUNNING
 
 
+class _CycleState:
+    """Per-cycle data shared between the sequence's behaviours."""
+
+    policy_name: str | None = None
+
+
 class _WaitForCrouch(py_trees.behaviour.Behaviour):
-    def __init__(self, context: SquatWorkflowContext, walking: Any):
+    def __init__(
+        self, context: SquatWorkflowContext, walking: Any, cycle: _CycleState
+    ):
         super().__init__(name="Wait for crouch in walking mode")
         self.context = context
         self.walking = walking
+        self.cycle = cycle
 
     def update(self) -> py_trees.common.Status:
         if self.context.current_mode != self.walking:
             self.context.discard_crouch_request()
             return py_trees.common.Status.RUNNING
-        if self.context.consume_crouch_request():
+        policy_name = self.context.consume_crouch_request()
+        if policy_name:
+            # The button pressed selects which policy runs this cycle.
+            self.cycle.policy_name = policy_name
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.RUNNING
 
 
 class _StartPolicy(py_trees.behaviour.Behaviour):
-    def __init__(self, context: SquatWorkflowContext):
+    def __init__(self, context: SquatWorkflowContext, cycle: _CycleState):
         super().__init__(name="Start squat policy")
         self.context = context
+        self.cycle = cycle
 
     def update(self) -> py_trees.common.Status:
-        self.context.begin_squat()
+        assert self.cycle.policy_name is not None
+        self.context.begin_squat(self.cycle.policy_name)
         if self.context.policy_is_ready():
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.RUNNING
@@ -112,6 +128,8 @@ class _RunSquatUntilStanding(py_trees.behaviour.Behaviour):
             self.context.request_crouch()
             self.crouch_requested = True
 
+        # Any policy button ends the crouch; the selection only matters
+        # when a cycle starts.
         if self.context.consume_crouch_request():
             self.context.request_stand()
             self.stand_requested = True
@@ -157,12 +175,13 @@ def create_squat_workflow(
     if standing_stable_ticks < 1:
         raise ValueError("standing_stable_ticks must be at least one")
 
+    cycle = _CycleState()
     squat = py_trees.composites.Sequence(
         name="Walking squat cycle",
         memory=True,
         children=[
-            _WaitForCrouch(context, walking_mode),
-            _StartPolicy(context),
+            _WaitForCrouch(context, walking_mode, cycle),
+            _StartPolicy(context, cycle),
             _EnterCustom(context),
             _RunSquatUntilStanding(
                 context, custom_mode, standing_stable_ticks

@@ -1,8 +1,10 @@
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 from dataclasses import MISSING
 import torch
 
 from ..utils.isaaclab.configclass import configclass
+
+DEFAULT_POLICY_NAME = "squat"
 
 
 @configclass
@@ -85,6 +87,10 @@ class ControllerCfg:
     policy_dt: float = 0.02
     robot: RobotCfg = MISSING
     policy: PolicyCfg = MISSING
+    # Alternate policies selectable by name at runtime (controller buttons on
+    # the real robot, `--policy` in MuJoCo). `policy` is always available under
+    # the name `DEFAULT_POLICY_NAME`.
+    policies: Dict[str, PolicyCfg] = {}
 
     mujoco: MujocoControllerCfg = MujocoControllerCfg()
     booster: BoosterRobotControllerCfg = BoosterRobotControllerCfg()
@@ -92,3 +98,20 @@ class ControllerCfg:
 
     def __post_init__(self):
         self.mujoco.physics_dt = self.policy_dt / self.mujoco.decimation
+        if DEFAULT_POLICY_NAME in self.policies:
+            raise ValueError(
+                f"'{DEFAULT_POLICY_NAME}' is reserved for ControllerCfg.policy"
+            )
+
+    def policy_names(self) -> list[str]:
+        return [DEFAULT_POLICY_NAME, *self.policies]
+
+    def get_policy(self, name: str | None = None) -> PolicyCfg:
+        if name is None or name == DEFAULT_POLICY_NAME:
+            return self.policy
+        try:
+            return self.policies[name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Unknown policy '{name}'; available: {self.policy_names()}"
+            ) from exc

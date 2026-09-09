@@ -12,8 +12,8 @@ from .base_controller import BaseController, ControllerCfg
 
 
 class MujocoController(BaseController):
-    def __init__(self, cfg: ControllerCfg):
-        super().__init__(cfg)
+    def __init__(self, cfg: ControllerCfg, policy_name: str | None = None):
+        super().__init__(cfg, policy_name)
         self.remote_control = RemoteControlService()
         self.remote_control.arm_squat_toggle()
         self.remote_control.print_controls(real_robot=False)
@@ -238,8 +238,13 @@ class MujocoController(BaseController):
                 dof_targets = self.policy_step()
                 self.ctrl_step(dof_targets)
 
-                if self.cfg.mujoco.visualize_reference_ghost:
+                if (
+                    self.cfg.mujoco.visualize_reference_ghost
+                    or self._reference_qpos is not None
+                ):
                     # Render kinematic "ghost" robot from generalized coordinates.
+                    # Reference-tracking policies (kneel) publish one
+                    # each step; feed-forward policies never do.
                     self.render_reference_robot(
                         viewer,
                         rgba=self._ghost_rgba,

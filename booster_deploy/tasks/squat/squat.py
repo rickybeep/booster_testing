@@ -15,6 +15,7 @@ from booster_deploy.controllers.controller_cfg import (
     PolicyCfg,
 )
 from booster_deploy.robots.booster import K1_CFG
+from tasks.squat.kneel import KneelPolicyCfg
 from booster_deploy.utils.isaaclab import math as lab_math
 from booster_deploy.utils.isaaclab.configclass import configclass
 
@@ -38,6 +39,8 @@ JOINT_ALIASES = {
     "Right_Shoulder_Pitch": "ARight_Shoulder_Pitch",
 }
 HEAD_ACTION_SCALE_MULTIPLIER = 0.1
+# Alternate policy started by controller X / keyboard `m`.
+KNEEL_POLICY_NAME = "kneel"
 
 # Squat depth shows up almost entirely in these joints: measured in MuJoCo they
 # sit within 0.11 rad of the default pose while standing and 0.85 rad away at
@@ -282,6 +285,11 @@ class K1SquatControllerCfg(ControllerCfg):
     policy: SquatPolicyCfg = SquatPolicyCfg(
         checkpoint_path="models/squat.onnx",
     )
+    policies = {
+        KNEEL_POLICY_NAME: KneelPolicyCfg(
+            checkpoint_path="models/kneel.onnx",
+        ),
+    }
     mujoco = MujocoControllerCfg(
         init_pos=[0.0, 0.0, 0.518],
     )

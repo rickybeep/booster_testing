@@ -13,6 +13,12 @@ group.add_argument("-l", "--list", action="store_true", dest="list_tasks",
 
 parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
+parser.add_argument(
+    "--policy", type=str, default=None,
+    help="MuJoCo only: named policy from the task config (default: the "
+    "task's primary policy). On the real robot the controller button "
+    "selects the policy.",
+)
 parser.add_argument("--webots", action="store_true", default=False,
                     help="deploy in webots simulation")
 args = parser.parse_args()
@@ -38,6 +44,7 @@ def main():
             cls = type(cfg)
             full_cls = f"{cls.__module__}.{cls.__qualname__}"
             print(f"  {task_name}\t:\t{full_cls}")
+            print(f"  \tpolicies: {', '.join(cfg.policy_names())}")
         sys.exit(0)
 
     try:
@@ -51,7 +58,13 @@ def main():
         # run mujoco controller
         from booster_deploy.controllers.mujoco_controller import MujocoController
 
-        MujocoController(task_cfg).run()
+        if args.policy is not None and args.policy not in task_cfg.policy_names():
+            print(
+                f"Unknown policy '{args.policy}'. "
+                f"Available policies: {task_cfg.policy_names()}"
+            )
+            sys.exit(1)
+        MujocoController(task_cfg, args.policy).run()
     else:
         # The high-level SDK changes robot modes. The firmware ROS interface
         # still supplies the low-level state and joint-command message types.
