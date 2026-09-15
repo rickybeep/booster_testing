@@ -1,4 +1,5 @@
 import argparse
+import signal
 import sys
 
 sys.path.append(".")
@@ -15,6 +16,9 @@ parser.add_argument("--mujoco", action="store_true", default=False,
                     help="deploy in mujoco simulation")
 parser.add_argument("--webots", action="store_true", default=False,
                     help="deploy in webots simulation")
+parser.add_argument("--policy-node-only", action="store_true", default=False,
+                    help="run only the C++ policy node, for use with "
+                    "booster_deploy.policy_client.PolicyClient")
 args = parser.parse_args()
 
 
@@ -66,15 +70,14 @@ def main():
             sys.exit(1)
         try:
             import booster_interface  # noqa: F401
-        except ImportError:
+            import booster_policy  # noqa: F401
+        except ImportError as exc:
             print(
-                "Error: the ROS 2 'booster_interface' package is not available.\n"
-                "Real-robot deployment needs the firmware-provided low-level "
-                "ROS interface in addition to booster-sdk.\n"
-                "The Pixi deploy task sources both /opt/ros/humble/setup.bash "
-                "and /opt/booster/BoosterRos2Interface/install/setup.bash; "
-                "run it on the robot and verify that the overlay provides "
-                "the booster_interface package.\n"
+                f"Error: the ROS 2 '{exc.name}' package is not available.\n"
+                "Real-robot deployment needs the local ROS workspace with the "
+                "booster_interface messages and the C++ booster_policy node.\n"
+                "Build it with `pixi run ros-build` and launch through "
+                "`pixi run deploy`, which sources ros2_ws/install/setup.bash.\n"
                 "For simulation, run: pixi run deploy-mujoco"
             )
             sys.exit(1)
@@ -84,6 +87,25 @@ def main():
             ankles = [-8, -7, -2, -1]  # indices of ankle joints
             for i in ankles:
                 task_cfg.robot.joint_damping[i] = 0.5
+
+        if args.policy_node_only:
+            from booster_deploy.policy_node import PolicyNodeProcess
+
+            def interrupt(sig, frame):
+                raise KeyboardInterrupt
+
+            # Set both explicitly: a parent may have left SIGINT ignored.
+            signal.signal(signal.SIGINT, interrupt)
+            signal.signal(signal.SIGTERM, interrupt)
+            node = PolicyNodeProcess(task_cfg, use_low_state_clock=args.webots)
+            node.start()
+            try:
+                sys.exit(node.wait())
+            except KeyboardInterrupt:
+                pass
+            finally:
+                node.stop()
+            return
 
         from booster_deploy.controllers.booster_robot_controller import BoosterRobotPortal
         with BoosterRobotPortal(task_cfg, use_sim_time=args.webots) as portal:

@@ -1,6 +1,5 @@
 from typing import Callable, List, Optional
 from dataclasses import MISSING
-import torch
 
 from ..utils.isaaclab.configclass import configclass
 
@@ -27,7 +26,6 @@ class MujocoControllerCfg:
 @configclass
 class BoosterRobotControllerCfg:
     low_state_dt: float = 0.002
-    metrics_max_events: int = 2000
     standing_joint_velocity_tolerance: float = 0.25
     standing_stable_ticks: int = 5
 
@@ -64,11 +62,27 @@ class RobotCfg:
 
 @configclass
 class PolicyCfg:
-    constructor: Callable = MISSING
-    checkpoint_path: str = MISSING
+    """Parameters for the C++ policy node.
+
+    Paths are relative to the deploy root. A null gain override path disables
+    file-based overrides for that policy.
+    """
+
+    # "walk" runs the joystick gait and switches to squat on command; "squat"
+    # runs the squat policy by itself.
+    mode: str = MISSING
+    walk_checkpoint_path: Optional[str] = None
+    walk_gain_overrides_path: Optional[str] = None
+    squat_checkpoint_path: str = "tasks/squat/models/squat.onnx"
+    squat_gain_overrides_path: Optional[str] = "tasks/squat/gain_overrides.json"
     enable_safety_fallback: bool = True
-    start_on_walking: bool = False
-    device: str | torch.device = "cpu"
+    # Smallest upright gravity projection tolerated before the policy stops;
+    # 0.5 is roughly 60 degrees of trunk tilt.
+    min_upright_projection: float = 0.5
+    standing_joint_pos_tolerance: float = 0.3
+    # The node zeroes the velocity when no command arrives for this long.
+    command_timeout: float = 0.5
+    onnx_threads: int = 1
 
 
 @configclass

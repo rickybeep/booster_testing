@@ -4,38 +4,42 @@ import os
 from pathlib import Path
 from time import sleep
 import numpy as np
-import torch
 import mujoco
 import mujoco.viewer
+import booster_policy_core
+from ..policy_node import make_policy_controller
 from ..utils.remote_control_service import RemoteControlService
-from .base_controller import BaseController, ControllerCfg
+from .controller_cfg import ControllerCfg
 
 
-class MujocoController(BaseController):
+class MujocoController:
+    """Simulate the K1 in MuJoCo with the C++ policy core in-process."""
+
     def __init__(self, cfg: ControllerCfg):
-        super().__init__(cfg)
+        self.cfg = cfg
+        self._step_count = 0
+        self.is_running = False
+        self.policy = make_policy_controller(cfg)
+        self.default_joint_pos = np.asarray(cfg.robot.default_joint_pos, dtype=np.float32)
+        self.effort_limit = np.asarray(cfg.robot.effort_limit, dtype=np.float32)
         self.remote_control = RemoteControlService()
         self.remote_control.arm_squat_toggle()
         self.remote_control.print_controls(real_robot=False)
 
-        mjcf_path = self._expand_assets_placeholder(self.robot.cfg.mjcf_path)
+        mjcf_path = self._expand_assets_placeholder(cfg.robot.mjcf_path)
         self.mj_model = mujoco.MjModel.from_xml_path(mjcf_path)
         self.mj_model.opt.timestep = self.cfg.mujoco.physics_dt
         self.decimation = self.cfg.mujoco.decimation
         self.mj_data = mujoco.MjData(self.mj_model)
         mujoco.mj_resetData(self.mj_model, self.mj_data)
 
-        if hasattr(self.policy, "get_initial_qpos"):
-            initial_qpos = self.policy.get_initial_qpos()  # type: ignore[attr-defined]
-        else:
-            initial_qpos = np.concatenate(
-                [
-                    np.array(self.cfg.mujoco.init_pos, dtype=np.float32),
-                    np.array(self.cfg.mujoco.init_quat, dtype=np.float32),
-                    self.robot.default_joint_pos.numpy(),
-                ]
-            )
-        initial_qpos = np.asarray(initial_qpos, dtype=np.float32).reshape(-1)
+        initial_qpos = np.concatenate(
+            [
+                np.array(self.cfg.mujoco.init_pos, dtype=np.float32),
+                np.array(self.cfg.mujoco.init_quat, dtype=np.float32),
+                self.default_joint_pos,
+            ]
+        )
         if initial_qpos.shape != (int(self.mj_model.nq),):
             raise ValueError(
                 f"Initial qpos has shape {initial_qpos.shape}; "
@@ -63,9 +67,13 @@ class MujocoController(BaseController):
         self._reference_qpos: np.ndarray | None = None
 
     def start(self):
-        # Clear reference; policy.reset() may set a fresh one.
         self._reference_qpos = None
-        return super().start()
+        self._step_count = 0
+        self.is_running = True
+        self.policy.reset()
+
+    def stop(self) -> None:
+        self.is_running = False
 
     def render_reference_robot(
         self,
@@ -90,25 +98,16 @@ class MujocoController(BaseController):
         for i in range(viewer.user_scn.ngeom):
             viewer.user_scn.geoms[i].rgba[:] = rgba
 
-    def set_reference_qpos(
-        self,
-        qpos: np.ndarray | torch.Tensor | None,
-    ) -> None:
+    def set_reference_qpos(self, qpos: np.ndarray | None) -> None:
         """Set the reference generalized coordinates (qpos) for ghost rendering.
 
-        Policies should call this each step (or whenever updated). Pass None to
-        clear the reference.
+        Pass None to clear the reference.
         """
         if qpos is None:
             self._reference_qpos = None
             return
 
-        if isinstance(qpos, torch.Tensor):
-            qpos_np = qpos.detach().cpu().numpy()
-        else:
-            qpos_np = np.asarray(qpos)
-
-        qpos_np = qpos_np.astype(np.float32, copy=False).reshape(-1)
+        qpos_np = np.asarray(qpos).astype(np.float32, copy=False).reshape(-1)
         if qpos_np.shape[0] != int(self.mj_model.nq):
             raise ValueError(
                 f"reference qpos must have shape (nq,), got {qpos_np.shape} (nq={int(self.mj_model.nq)})"
@@ -133,30 +132,27 @@ class MujocoController(BaseController):
             raise FileNotFoundError(f"MuJoCo model not found: {expanded}")
         return expanded
 
-    def update_state(self) -> None:
-        dof_pos = self.mj_data.qpos.astype(np.float32)[7:]
-        dof_vel = self.mj_data.qvel.astype(np.float32)[6:]
-        dof_torque = self.mj_data.qfrc_actuator[6:].astype(np.float32)
-
-        base_pos_w = self.mj_data.qpos.astype(np.float32)[:3]
-        base_quat = self.mj_data.qpos.astype(np.float32)[3:7]
-        base_lin_vel_b = self.mj_data.qvel.astype(np.float32)[:3]
-        base_ang_vel_b = self.mj_data.qvel.astype(np.float32)[3:6]
-
-        self.robot.data.joint_pos = torch.from_numpy(
-            dof_pos).to(self.robot.data.device)
-        self.robot.data.joint_vel = torch.from_numpy(
-            dof_vel).to(self.robot.data.device)
-        self.robot.data.feedback_torque = torch.from_numpy(
-            dof_torque).to(self.robot.data.device)
-        self.robot.data.root_pos_w = torch.from_numpy(
-            base_pos_w).to(self.robot.data.device)
-        self.robot.data.root_quat_w = torch.from_numpy(
-            base_quat).to(self.robot.data.device)
-        self.robot.data.root_lin_vel_b = torch.from_numpy(
-            base_lin_vel_b).to(self.robot.data.device)
-        self.robot.data.root_ang_vel_b = torch.from_numpy(
-            base_ang_vel_b).to(self.robot.data.device)
+    def policy_step(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Run the C++ policy on the current simulator state."""
+        qpos = self.mj_data.qpos.astype(np.float32)
+        qvel = self.mj_data.qvel.astype(np.float32)
+        gravity = booster_policy_core.projected_gravity_from_quaternion(
+            *(float(value) for value in qpos[3:7])
+        )
+        self._step_count += 1
+        targets = self.policy.step(
+            qvel[3:6],
+            gravity,
+            qpos[7:],
+            qvel[6:],
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0),
+            self.remote_control.get_squat_enabled(),
+        )
+        if self.policy.upright_fault:
+            print("\nLarge orientation error detected; stopping policy.")
+            self.stop()
+        return targets
 
     def log_states(self, dof_targets: np.ndarray) -> None:
         if self.cfg.mujoco.log_states is not None:
@@ -193,20 +189,17 @@ class MujocoController(BaseController):
                 print(f'saved {self.cfg.mujoco.log_states}.npz '
                       f'at {self._step_count} steps')
 
-    def ctrl_step(self, dof_targets: torch.Tensor):
-        dof_targets = dof_targets.cpu().numpy()  # type: ignore
+    def ctrl_step(self, dof_targets: np.ndarray, kp: np.ndarray, kd: np.ndarray):
         self.log_states(dof_targets)
         dof_pos = self.mj_data.qpos.astype(np.float32)[7:]
         dof_vel = self.mj_data.qvel.astype(np.float32)[6:]
-        kp = self.robot.joint_stiffness.numpy()
-        kd = self.robot.joint_damping.numpy()
         # ctrl_limit = [
         #     np.minimum(self.mj_model.actuator_forcerange[:, 0],
         #                self.mj_model.actuator_ctrlrange[:, 0]),
         #     np.maximum(self.mj_model.actuator_forcerange[:, 1],
         #                self.mj_model.actuator_ctrlrange[:, 1]),
         # ]
-        ctrl_limit = self.robot.effort_limit.numpy()
+        ctrl_limit = self.effort_limit
         for i in range(self.decimation):
             self.mj_data.ctrl = np.clip(
                 kp * (dof_targets - dof_pos) - kd * dof_vel,
@@ -229,14 +222,10 @@ class MujocoController(BaseController):
 
             self.viewer = viewer
             viewer.cam.elevation = -20
-            self.update_state()
             self.start()
             while viewer.is_running() and self.is_running:
                 sleep(self.cfg.mujoco.physics_dt * self.cfg.mujoco.decimation)
-                self.update_state()
-                self.squat_enabled = self.remote_control.get_squat_enabled()
-                dof_targets = self.policy_step()
-                self.ctrl_step(dof_targets)
+                self.ctrl_step(*self.policy_step())
 
                 if self.cfg.mujoco.visualize_reference_ghost:
                     # Render kinematic "ghost" robot from generalized coordinates.

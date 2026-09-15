@@ -1,0 +1,6 @@
+# Reset the policies and start publishing joint commands.
+---
+bool success
+string message
+# Identifies this run in PolicyStatus.session.
+uint32 session
