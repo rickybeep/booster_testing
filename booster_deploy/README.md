@@ -88,14 +88,20 @@ joint positions from the ONNX metadata.
 
 ## Policy models
 
-The gait and squat models are loaded from `tasks/walk/models/gait.onnx` and
-`tasks/squat/models/squat.onnx`. Both return 22 joint actions. Deployment owns
+The gait and squat models are loaded from `tasks/walk/models/gait_history.onnx` and
+`tasks/squat/models/squat.onnx`. The gait returns 20 body joint actions; squat returns 22 joint actions. Deployment maps
+gait actions and gains to robot message slots 2–21, with manual head targets in
+slots 0–1. Deployment owns
 the command handling, head override, and safety fallback; model metadata supplies
 the joint order, default pose, gains, and action scales.
 
-The gait model consumes 50 chronological frames of 72-value proprioception and
-a separate instantaneous 3-value velocity command. After a reset, deployment
-fills the history with the first frame, matching the training environment.
+The gait model consumes one `obs` input of shape `[1, 10, 69]`: ten chronological
+frames containing angular velocity (3), projected gravity (3), body joint position
+offsets (20), body joint velocities (20), previous actions (20), and velocity
+commands (3). Head joints are excluded from observations and actions. After a reset, deployment
+fills the history with the first frame, matching the training environment. The
+model input clamps forward, backward, and lateral velocity independently to
+`1.5 m/s`, and angular velocity to `2.5 rad/s`.
 
 ## Gain overrides
 
@@ -129,7 +135,7 @@ pixi run lint
 pixi run ros-build
 ```
 
-The tracked policy artifacts are `tasks/walk/models/gait.onnx` and
+The tracked policy artifacts are `tasks/walk/models/gait_history.onnx` and
 `tasks/squat/models/squat.onnx`. Their metadata is validated at startup and is
 the source of truth for observation layout, joint order, default positions,
 gains, and action scaling.

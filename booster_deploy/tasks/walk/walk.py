@@ -20,19 +20,21 @@ from booster_deploy.utils.isaaclab.configclass import configclass
 from tasks.squat.squat import JOINT_ALIASES, SquatPolicy, SquatPolicyCfg
 
 
-INPUT_NAMES = ("history", "instant")
+INPUT_NAMES = ("obs",)
 OUTPUT_NAMES = ("actions",)
-HISTORY_LENGTH = 50
-OBSERVATION_SIZE = 72
+HISTORY_LENGTH = 10
+POLICY_JOINT_COUNT = 20
+OBSERVATION_SIZE = 69
 COMMAND_SIZE = 3
 MAX_TRANSLATIONAL_SPEED = 1.5
-MAX_YAW_RATE = 2.4
+MAX_YAW_RATE = 2.5
 EXPECTED_OBSERVATIONS = (
     "base_ang_vel",
     "projected_gravity",
     "joint_pos",
     "joint_vel",
     "actions",
+    "command",
 )
 EXPECTED_COMMANDS = ("twist",)
 HEAD_JOINTS = ("Head_Yaw", "Head_Pitch")
@@ -77,14 +79,21 @@ class WalkPolicy(Policy):
             dtype=np.int64,
         )
         self.head_indices = np.asarray(
-            [self.policy_joint_names.index(name) for name in HEAD_JOINTS],
+            [self.robot.cfg.joint_names.index(JOINT_ALIASES[name]) for name in HEAD_JOINTS],
             dtype=np.int64,
         )
         self._validate_robot_config()
-        self.joint_stiffness = torch.from_numpy(
+        # The publisher indexes full robot arrays, including the two head slots.
+        self.joint_stiffness = torch.tensor(
+            self.robot.cfg.joint_stiffness, dtype=torch.float32
+        )
+        self.joint_stiffness[self.policy_to_robot] = torch.from_numpy(
             _float_csv(self.metadata, "joint_stiffness")
         )
-        self.joint_damping = torch.from_numpy(
+        self.joint_damping = torch.tensor(
+            self.robot.cfg.joint_damping, dtype=torch.float32
+        )
+        self.joint_damping[self.policy_to_robot] = torch.from_numpy(
             _float_csv(self.metadata, "joint_damping")
         )
         self._apply_gain_overrides()
@@ -111,21 +120,16 @@ class WalkPolicy(Policy):
                 f"Unexpected walk ONNX outputs: {tuple(outputs)}; "
                 f"expected {OUTPUT_NAMES}"
             )
-        if outputs["actions"].shape != [1, self.robot.num_joints]:
+        if outputs["actions"].shape != [1, POLICY_JOINT_COUNT]:
             raise ValueError(
-                f"Walk ONNX actions must be [1, {self.robot.num_joints}], "
+                f"Walk ONNX actions must be [1, {POLICY_JOINT_COUNT}], "
                 f"got {outputs['actions'].shape}"
             )
-        if inputs["history"].shape != [1, HISTORY_LENGTH, OBSERVATION_SIZE]:
+        if inputs["obs"].shape != [1, HISTORY_LENGTH, OBSERVATION_SIZE]:
             raise ValueError(
                 "Walk ONNX history must be "
                 f"[1, {HISTORY_LENGTH}, {OBSERVATION_SIZE}], "
-                f"got {inputs['history'].shape}"
-            )
-        if inputs["instant"].shape != [1, COMMAND_SIZE]:
-            raise ValueError(
-                f"Walk ONNX instant input must be [1, {COMMAND_SIZE}], "
-                f"got {inputs['instant'].shape}"
+                f"got {inputs['obs'].shape}"
             )
         if tuple(_csv(self.metadata, "observation_names")) != EXPECTED_OBSERVATIONS:
             raise ValueError("Unexpected walk observation layout")
@@ -133,35 +137,48 @@ class WalkPolicy(Policy):
             raise ValueError("Unexpected walk command layout")
         if not np.all(_float_csv(self.metadata, "observation_terms_scale") == 1.0):
             raise ValueError("Walk ONNX expects unscaled observations")
-        expected_history = np.full(5, HISTORY_LENGTH, dtype=np.float32)
+        expected_history = np.full(
+            len(EXPECTED_OBSERVATIONS), HISTORY_LENGTH, dtype=np.float32
+        )
         history = _float_csv(self.metadata, "observation_terms_history_length")
         if not np.array_equal(history, expected_history):
             raise ValueError(f"Unexpected walk history layout: {history}")
-        expected_flatten = np.zeros(5, dtype=np.float32)
+        expected_flatten = np.zeros(len(EXPECTED_OBSERVATIONS), dtype=np.float32)
         flatten = _float_csv(self.metadata, "observation_terms_flatten_history_dim")
         if not np.array_equal(flatten, expected_flatten):
             raise ValueError(f"Unexpected walk observation flattening: {flatten}")
         clips = _csv(self.metadata, "observation_terms_clip")
         if any(clip != "-inf;inf" for clip in clips):
             raise ValueError(f"Walk ONNX expects observation clipping: {clips}")
-        if len(_csv(self.metadata, "joint_names")) != self.robot.num_joints:
-            raise ValueError("Walk ONNX joint count does not match the robot")
+        if len(_csv(self.metadata, "joint_names")) != POLICY_JOINT_COUNT:
+            raise ValueError("Walk ONNX must control 20 joints")
+        if set(_csv(self.metadata, "excluded_joint_names")) != set(HEAD_JOINTS):
+            raise ValueError("Walk ONNX must exclude exactly the head joints")
+        for key in ("default_joint_pos", "action_scale", "joint_stiffness", "joint_damping"):
+            values = _float_csv(self.metadata, key)
+            if values.shape != (POLICY_JOINT_COUNT,) or not np.isfinite(values).all():
+                raise ValueError(f"Walk ONNX {key} must contain 20 finite values")
 
     def _validate_robot_config(self) -> None:
         resolved_names = [
             JOINT_ALIASES.get(name, name) for name in self.policy_joint_names
         ]
-        if resolved_names != self.robot.cfg.joint_names:
-            raise ValueError("Walk ONNX joint order does not match the K1 config")
+        expected_names = [
+            name for index, name in enumerate(self.robot.cfg.joint_names)
+            if index not in self.head_indices
+        ]
+        if (
+            len(set(resolved_names)) != POLICY_JOINT_COUNT
+            or set(resolved_names) != set(expected_names)
+        ):
+            raise ValueError("Walk ONNX body joints do not match the K1 config")
         if not np.allclose(
             self.default_joint_pos,
-            self.robot.cfg.default_joint_pos,
+            np.asarray(self.robot.cfg.default_joint_pos)[self.policy_to_robot],
             rtol=0.0,
             atol=1e-6,
         ):
             raise ValueError("K1 default_joint_pos does not match walk ONNX metadata")
-        if self.action_scale.shape != (self.robot.num_joints,):
-            raise ValueError("Walk ONNX action scale must contain 22 values")
 
     def _apply_gain_overrides(self) -> None:
         if self.cfg.gain_overrides_path is None:
@@ -205,7 +222,7 @@ class WalkPolicy(Policy):
         self.robot.joint_damping = self.joint_damping.clone()
 
     def reset(self) -> None:
-        self.last_action = np.zeros((self.robot.num_joints,), dtype=np.float32)
+        self.last_action = np.zeros((POLICY_JOINT_COUNT,), dtype=np.float32)
         self.observation_history = np.empty(
             (HISTORY_LENGTH, OBSERVATION_SIZE), dtype=np.float32
         )
@@ -227,10 +244,6 @@ class WalkPolicy(Policy):
         joint_pos = (joint_pos - self.default_joint_pos).copy()
         joint_vel = joint_vel.copy()
 
-        # Maelstrom's gait wrapper masks the head state while retaining all 22
-        # action slots expected by this exported model.
-        joint_pos[self.head_indices] = 0.0
-        joint_vel[self.head_indices] = 0.0
         observation = np.concatenate(
             (
                 self.robot.data.root_ang_vel_b.cpu().numpy(),
@@ -238,6 +251,7 @@ class WalkPolicy(Policy):
                 joint_pos,
                 joint_vel,
                 self.last_action,
+                self._command_observation(),
             )
         ).astype(np.float32, copy=False)
         if observation.shape != (OBSERVATION_SIZE,):
@@ -267,10 +281,7 @@ class WalkPolicy(Policy):
         self._push_history_frame(observation)
         results = self.session.run(
             list(OUTPUT_NAMES),
-            {
-                "history": self.observation_history[None, :, :],
-                "instant": self._command_observation()[None, :],
-            },
+            {"obs": self.observation_history[None, :, :]},
         )
         action = results[0][0].astype(np.float32, copy=False)
 
@@ -284,7 +295,7 @@ class WalkPolicy(Policy):
         policy_targets = self.default_joint_pos + self.action_scale * action
         robot_targets = self.robot.default_joint_pos.clone()
         robot_targets[self.policy_to_robot] = torch.from_numpy(policy_targets)
-        robot_targets[self.policy_to_robot[self.head_indices]] = torch.tensor(
+        robot_targets[self.head_indices] = torch.tensor(
             self.controller.head_target,
             dtype=torch.float32,
         )
@@ -353,5 +364,5 @@ class WalkPolicyCfg(PolicyCfg):
 @configclass
 class K1WalkControllerCfg(ControllerCfg):
     robot = K1_CFG
-    policy: WalkPolicyCfg = WalkPolicyCfg(checkpoint_path="models/gait.onnx")
+    policy: WalkPolicyCfg = WalkPolicyCfg(checkpoint_path="models/gait_history.onnx")
     mujoco = MujocoControllerCfg(init_pos=[0.0, 0.0, 0.518])

@@ -41,14 +41,14 @@ class CapturingSession:
         inputs: dict[str, np.ndarray],
     ) -> list[np.ndarray]:
         self.inputs = inputs
-        return [np.zeros((1, 22), dtype=np.float32)]
+        return [np.zeros((1, 20), dtype=np.float32)]
 
 
 class WalkPolicyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.controller = FakeController()
         self.policy = WalkPolicy(
-            WalkPolicyCfg(checkpoint_path="models/gait.onnx"),
+            WalkPolicyCfg(checkpoint_path="models/gait_history.onnx"),
             self.controller,
         )
         self.real_session = self.policy.session
@@ -63,26 +63,26 @@ class WalkPolicyTest(unittest.TestCase):
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
-        history = inputs["history"]
+        history = inputs["obs"]
         self.assertEqual(history.shape, (1, HISTORY_LENGTH, OBSERVATION_SIZE))
         np.testing.assert_array_equal(history[0, 0], history[0, -1])
         np.testing.assert_array_equal(history[0, -1, 6:8], [0.0, 0.0])
-        np.testing.assert_array_equal(history[0, -1, 28:30], [0.0, 0.0])
+        np.testing.assert_array_equal(history[0, -1, 26:28], [0.0, 0.0])
 
         self.controller.robot.data.root_ang_vel_b[0] = 1.0
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
-        history = inputs["history"]
+        history = inputs["obs"]
         self.assertEqual(history[0, -2, 0], 0.0)
         self.assertEqual(history[0, -1, 0], 1.0)
 
-    def test_joystick_command_is_clipped_as_instant_input(self) -> None:
+    def test_joystick_command_is_clipped_in_history(self) -> None:
         self.controller.velocity_command = (3.05, -2.0, 4.0)
         self.policy.inference()
         inputs = self.session.inputs
         assert inputs is not None
-        command = inputs["instant"][0]
+        command = inputs["obs"][0, -1, -3:]
         self.assertEqual(command.dtype, np.float32)
         np.testing.assert_allclose(
             command,
@@ -97,7 +97,7 @@ class WalkPolicyTest(unittest.TestCase):
         inputs = self.session.inputs
         assert inputs is not None
         np.testing.assert_array_equal(
-            inputs["instant"][0],
+            inputs["obs"][0, -1, -3:],
             np.asarray([0.05, 0.0, 0.0], dtype=np.float32),
         )
 
@@ -106,9 +106,45 @@ class WalkPolicyTest(unittest.TestCase):
         inputs = self.session.inputs
         assert inputs is not None
         np.testing.assert_array_equal(
-            inputs["instant"][0],
+            inputs["obs"][0, -1, -3:],
             np.zeros(3, dtype=np.float32),
         )
+
+    def test_body_state_actions_and_gains_use_robot_message_offsets(self) -> None:
+        offsets = np.arange(20, dtype=np.float32) / 100
+        velocities = np.arange(20, dtype=np.float32) + 1
+        self.controller.robot.data.joint_pos[2:] += torch.from_numpy(offsets)
+        self.controller.robot.data.joint_vel[2:] = torch.from_numpy(velocities)
+        actions = np.arange(20, dtype=np.float32) / 20
+        self.session.run = lambda *args: [actions[None, :]]
+        targets = self.policy.inference()
+        np.testing.assert_allclose(self.policy.observation_history[-1, 6:26], offsets, atol=1e-7)
+        np.testing.assert_array_equal(self.policy.observation_history[-1, 26:46], velocities)
+        np.testing.assert_allclose(
+            targets[2:].numpy(),
+            self.policy.default_joint_pos + self.policy.action_scale * actions,
+        )
+        np.testing.assert_array_equal(targets[:2].numpy(), [0, 0])
+        self.policy.inference()
+        np.testing.assert_array_equal(self.policy.observation_history[-1, 46:66], actions)
+        self.assertEqual(tuple(self.policy.joint_stiffness.shape), (22,))
+        self.assertEqual(tuple(self.policy.joint_damping.shape), (22,))
+        self.assertEqual(float(self.policy.joint_stiffness[10]), 80)
+        self.assertEqual(float(self.policy.joint_stiffness[15]), 45)
+        self.assertEqual(float(self.policy.joint_damping[14]), 2)
+        self.assertEqual(float(self.policy.joint_damping[21]), 2.5)
+
+    def test_commands_remain_in_chronological_history_and_reset(self) -> None:
+        for index in range(12):
+            self.controller.velocity_command = (index / 10, 0, 0)
+            self.policy.inference()
+        np.testing.assert_allclose(
+            self.policy.observation_history[:, -3], np.arange(2, 12) / 10,
+        )
+        self.policy._resume_walk()
+        self.controller.velocity_command = (0, 0, 0)
+        self.policy.inference()
+        np.testing.assert_array_equal(self.policy.observation_history[:, 46:], 0)
 
     def test_real_onnx_inference(self) -> None:
         self.policy.session = self.real_session
