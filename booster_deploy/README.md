@@ -89,19 +89,18 @@ joint positions from the ONNX metadata.
 ## Policy models
 
 The gait and squat models are loaded from `tasks/walk/models/gait_history.onnx` and
-`tasks/squat/models/squat.onnx`. The gait returns 20 body joint actions; squat returns 22 joint actions. Deployment maps
-gait actions and gains to robot message slots 2–21, with manual head targets in
-slots 0–1. Deployment owns
-the command handling, head override, and safety fallback; model metadata supplies
-the joint order, default pose, gains, and action scales.
+`tasks/squat/models/squat.onnx`. Both return 22 joint actions, including the head.
+Deployment maps actions and gains by joint name to all 22 robot message slots,
+then overrides head targets in slots 0–1 with manual D-pad control. Model metadata
+supplies the joint order, default pose, gains, and action scales.
 
-The gait model consumes one `obs` input of shape `[1, 10, 69]`: ten chronological
-frames containing angular velocity (3), projected gravity (3), body joint position
-offsets (20), body joint velocities (20), previous actions (20), and velocity
-commands (3). Head joints are excluded from observations and actions. After a reset, deployment
-fills the history with the first frame, matching the training environment. The
-model input clamps forward, backward, and lateral velocity independently to
-`1.5 m/s`, and angular velocity to `2.5 rad/s`.
+The gait model consumes `history` of shape `[1, 50, 72]`: 50 chronological frames
+containing angular velocity (3), projected gravity (3), joint position offsets
+(22), joint velocities (22), and previous model actions (22). Head state is
+included. Velocity commands are supplied separately as `instant` of shape
+`[1, 3]` and do not enter the history. After a reset, deployment fills the history
+with the first frame. The model input clamps forward, backward, and lateral
+velocity independently to `1.5 m/s`, and angular velocity to `2.5 rad/s`.
 
 ## Gain overrides
 

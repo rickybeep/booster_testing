@@ -20,11 +20,11 @@ from booster_deploy.utils.isaaclab.configclass import configclass
 from tasks.squat.squat import JOINT_ALIASES, SquatPolicy, SquatPolicyCfg
 
 
-INPUT_NAMES = ("obs",)
+INPUT_NAMES = ("history", "instant")
 OUTPUT_NAMES = ("actions",)
-HISTORY_LENGTH = 10
-POLICY_JOINT_COUNT = 20
-OBSERVATION_SIZE = 69
+HISTORY_LENGTH = 50
+POLICY_JOINT_COUNT = 22
+OBSERVATION_SIZE = 72
 COMMAND_SIZE = 3
 MAX_TRANSLATIONAL_SPEED = 1.5
 MAX_YAW_RATE = 2.5
@@ -125,53 +125,64 @@ class WalkPolicy(Policy):
                 f"Walk ONNX actions must be [1, {POLICY_JOINT_COUNT}], "
                 f"got {outputs['actions'].shape}"
             )
-        if inputs["obs"].shape != [1, HISTORY_LENGTH, OBSERVATION_SIZE]:
+        if inputs["history"].shape != [1, HISTORY_LENGTH, OBSERVATION_SIZE]:
             raise ValueError(
                 "Walk ONNX history must be "
                 f"[1, {HISTORY_LENGTH}, {OBSERVATION_SIZE}], "
-                f"got {inputs['obs'].shape}"
+                f"got {inputs['history'].shape}"
             )
+        if inputs["instant"].shape != [1, COMMAND_SIZE]:
+            raise ValueError(
+                f"Walk ONNX instant must be [1, {COMMAND_SIZE}], "
+                f"got {inputs['instant'].shape}"
+            )
+        if tuple(_csv(self.metadata, "observation_terms_group")) != (
+            "actor", "actor", "actor", "actor", "actor", "actor_command"
+        ):
+            raise ValueError("Unexpected walk observation groups")
         if tuple(_csv(self.metadata, "observation_names")) != EXPECTED_OBSERVATIONS:
             raise ValueError("Unexpected walk observation layout")
         if tuple(_csv(self.metadata, "command_names")) != EXPECTED_COMMANDS:
             raise ValueError("Unexpected walk command layout")
-        if not np.all(_float_csv(self.metadata, "observation_terms_scale") == 1.0):
+        if not np.array_equal(
+            _float_csv(self.metadata, "observation_terms_scale"),
+            np.ones(len(EXPECTED_OBSERVATIONS), dtype=np.float32),
+        ):
             raise ValueError("Walk ONNX expects unscaled observations")
         expected_history = np.full(
             len(EXPECTED_OBSERVATIONS), HISTORY_LENGTH, dtype=np.float32
         )
+        expected_history[-1] = 0  # Commands are instantaneous.
         history = _float_csv(self.metadata, "observation_terms_history_length")
         if not np.array_equal(history, expected_history):
             raise ValueError(f"Unexpected walk history layout: {history}")
         expected_flatten = np.zeros(len(EXPECTED_OBSERVATIONS), dtype=np.float32)
+        expected_flatten[-1] = 1
         flatten = _float_csv(self.metadata, "observation_terms_flatten_history_dim")
         if not np.array_equal(flatten, expected_flatten):
             raise ValueError(f"Unexpected walk observation flattening: {flatten}")
         clips = _csv(self.metadata, "observation_terms_clip")
-        if any(clip != "-inf;inf" for clip in clips):
+        if clips != ["-inf;inf"] * len(EXPECTED_OBSERVATIONS):
             raise ValueError(f"Walk ONNX expects observation clipping: {clips}")
         if len(_csv(self.metadata, "joint_names")) != POLICY_JOINT_COUNT:
-            raise ValueError("Walk ONNX must control 20 joints")
-        if set(_csv(self.metadata, "excluded_joint_names")) != set(HEAD_JOINTS):
-            raise ValueError("Walk ONNX must exclude exactly the head joints")
+            raise ValueError("Walk ONNX must control 22 joints")
+        if self.metadata.get("excluded_joint_names", ""):
+            raise ValueError("Walk ONNX must include all robot joints")
         for key in ("default_joint_pos", "action_scale", "joint_stiffness", "joint_damping"):
             values = _float_csv(self.metadata, key)
             if values.shape != (POLICY_JOINT_COUNT,) or not np.isfinite(values).all():
-                raise ValueError(f"Walk ONNX {key} must contain 20 finite values")
+                raise ValueError(f"Walk ONNX {key} must contain 22 finite values")
 
     def _validate_robot_config(self) -> None:
         resolved_names = [
             JOINT_ALIASES.get(name, name) for name in self.policy_joint_names
         ]
-        expected_names = [
-            name for index, name in enumerate(self.robot.cfg.joint_names)
-            if index not in self.head_indices
-        ]
+        expected_names = self.robot.cfg.joint_names
         if (
             len(set(resolved_names)) != POLICY_JOINT_COUNT
             or set(resolved_names) != set(expected_names)
         ):
-            raise ValueError("Walk ONNX body joints do not match the K1 config")
+            raise ValueError("Walk ONNX joints do not match the K1 config")
         if not np.allclose(
             self.default_joint_pos,
             np.asarray(self.robot.cfg.default_joint_pos)[self.policy_to_robot],
@@ -251,7 +262,6 @@ class WalkPolicy(Policy):
                 joint_pos,
                 joint_vel,
                 self.last_action,
-                self._command_observation(),
             )
         ).astype(np.float32, copy=False)
         if observation.shape != (OBSERVATION_SIZE,):
@@ -281,7 +291,10 @@ class WalkPolicy(Policy):
         self._push_history_frame(observation)
         results = self.session.run(
             list(OUTPUT_NAMES),
-            {"obs": self.observation_history[None, :, :]},
+            {
+                "history": self.observation_history[None, :, :],
+                "instant": self._command_observation()[None, :],
+            },
         )
         action = results[0][0].astype(np.float32, copy=False)
 
