@@ -17,6 +17,8 @@ from booster_deploy.controllers.controller_cfg import (
 from booster_deploy.robots.booster import K1_CFG
 from booster_deploy.utils.isaaclab import math as lab_math
 from booster_deploy.utils.isaaclab.configclass import configclass
+from booster_deploy.utils.remote_control_service import SIT_POLICY, SQUAT_POLICY
+from tasks.sit.sit import SitPolicy, SitPolicyCfg
 from tasks.squat.squat import JOINT_ALIASES, SquatPolicy, SquatPolicyCfg
 
 
@@ -52,7 +54,7 @@ def _float_csv(metadata: dict[str, str], key: str) -> np.ndarray:
 
 
 class WalkPolicy(Policy):
-    """History-encoder joystick gait with an in-process squat policy."""
+    """History-encoder joystick gait with in-process squat and sit policies."""
 
     def __init__(self, cfg: WalkPolicyCfg, controller: BaseController):
         super().__init__(cfg, controller)
@@ -105,6 +107,13 @@ class WalkPolicy(Policy):
             min_upright_projection=cfg.min_upright_projection,
         )
         self.squat_policy = SquatPolicy(squat_cfg, controller)
+        self.sit_policy = SitPolicy(
+            SitPolicyCfg(checkpoint_path=cfg.sit_checkpoint_path), controller
+        )
+        self.pose_policies: dict[str, SquatPolicy | SitPolicy] = {
+            SQUAT_POLICY: self.squat_policy,
+            SIT_POLICY: self.sit_policy,
+        }
         self.robot.data.to("cpu")
         self.reset()
 
@@ -239,10 +248,12 @@ class WalkPolicy(Policy):
         )
         self.history_initialized = False
         self.active_policy = "walk"
+        self.pose_policy = self.squat_policy
         self.squat_started = False
         self.squat_complete = False
         self.return_to_walk = False
-        self.squat_policy.reset()
+        for policy in self.pose_policies.values():
+            policy.reset()
         self._activate_walk()
 
     def compute_observation(self) -> np.ndarray:
@@ -314,13 +325,15 @@ class WalkPolicy(Policy):
         )
         return robot_targets
 
-    def _start_squat(self) -> None:
-        self.active_policy = "squat"
+    def _start_pose(self, name: str) -> None:
+        """Switch from walking to the squat or sit policy named by `name`."""
+        self.active_policy = name
+        self.pose_policy = self.pose_policies[name]
         self.squat_started = False
         self.squat_complete = False
         self.return_to_walk = False
-        self.squat_policy.reset()
-        self.squat_policy.activate()
+        self.pose_policy.reset()
+        self.pose_policy.activate()
 
     def _resume_walk(self) -> None:
         self.active_policy = "walk"
@@ -335,12 +348,12 @@ class WalkPolicy(Policy):
             self._resume_walk()
         if self.active_policy == "walk":
             if self.controller.squat_enabled:
-                self._start_squat()
+                self._start_pose(self.controller.pose_policy)
             else:
                 return self._walk_inference()
 
-        targets = self.squat_policy.inference()
-        standing = self.squat_policy.is_standing_pose()
+        targets = self.pose_policy.inference()
+        standing = self.pose_policy.is_standing_pose()
         if not standing:
             self.squat_started = True
         if not self.controller.squat_enabled and standing:
@@ -349,7 +362,10 @@ class WalkPolicy(Policy):
         return targets
 
     def is_squat_active(self) -> bool:
-        return self.active_policy == "squat"
+        return self.active_policy == SQUAT_POLICY
+
+    def is_sit_active(self) -> bool:
+        return self.active_policy == SIT_POLICY
 
     def squat_has_started(self) -> bool:
         return self.squat_started
@@ -360,7 +376,7 @@ class WalkPolicy(Policy):
     def is_standing_pose(self) -> bool:
         if self.active_policy == "walk":
             return True
-        return self.squat_policy.is_standing_pose()
+        return self.pose_policy.is_standing_pose()
 
 
 @configclass
@@ -371,6 +387,8 @@ class WalkPolicyCfg(PolicyCfg):
     gain_overrides_path: str | None = "gain_overrides.json"
     squat_checkpoint_path: str = "models/squat.onnx"
     squat_gain_overrides_path: str | None = "gain_overrides.json"
+    # Resolved relative to tasks/sit; the sit policy uses its ONNX gains only.
+    sit_checkpoint_path: str = "models/sit.onnx"
     min_upright_projection: float = 0.5
 
 

@@ -158,6 +158,8 @@ class BaseController:
         self._elapsed_s: float = 0.0
         self.is_running: bool = False
         self.squat_enabled: bool = False
+        # Which pose policy (squat or sit) `squat_enabled` applies to.
+        self.pose_policy: str = "squat"
         self.velocity_command: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self.head_target: tuple[float, float] = (0.0, 0.0)
         self.robot = BoosterRobot(cfg.robot)

@@ -1,8 +1,8 @@
-# Booster Walk and Squat Deploy
+# Booster Walk, Squat and Sit Deploy
 
 This repository deploys joystick-controlled learned walking and a
-toggle-controlled squat policy on the Booster K1, either in MuJoCo or on a real
-robot. Both policies remain loaded in one inference worker so switching does
+toggle-controlled squat and sit policies on the Booster K1, either in MuJoCo or
+on a real robot. All policies remain loaded in one inference worker so switching does
 not interrupt the low-level ROS publisher.
 
 ## Install
@@ -69,10 +69,11 @@ movement of the right stick commands yaw. The left-stick translational vector
 is zero inside a radial `0.1` stick dead zone. Outside it, nonzero translation
 is constrained to `0.2–0.75 m/s`, including diagonal input. Yaw reaches
 `1.5 rad/s` at full right-stick deflection. After learned walking is active,
-press controller B (or keyboard `s`) to switch to the squat policy and crouch.
-Press it again to stand; once the measured standing pose is restored, walking
+press controller B (or keyboard `s`) to switch to the squat policy and crouch,
+or controller X (or keyboard `m`) to switch to the sit policy. Press either
+button again to stand; once the active policy reports standing, walking
 resumes with a freshly reset policy state. In MuJoCo, the gait command stays
-zero and keyboard `s` controls the same policy switch.
+zero and keyboards `s`/`m` control the same policy switches.
 
 While learned walking is active, the D-pad controls the head independently of
 the gait: hold left/right for yaw and up/down for pitch. The target moves at
@@ -90,6 +91,7 @@ joint positions from the ONNX metadata.
 
 The gait and squat models are loaded from `tasks/walk/models/gait_history.onnx` and
 `tasks/squat/models/squat.onnx`. Both return 22 joint actions, including the head.
+The sit model is described separately below.
 Deployment maps actions and gains by joint name to all 22 robot message slots,
 then overrides head targets in slots 0–1 with manual D-pad control. Model metadata
 supplies the joint order, default pose, gains, and action scales.
@@ -101,6 +103,20 @@ included. Velocity commands are supplied separately as `instant` of shape
 `[1, 3]` and do not enter the history. After a reset, deployment fills the history
 with the first frame. The model input clamps forward, backward, and lateral
 velocity independently to `1.5 m/s`, and angular velocity to `2.5 rad/s`.
+
+## Sit ONNX contract
+
+`tasks/sit/models/sit.onnx` is a stateful motion-tracking policy with the same
+contract as the kneel policy on the `kneeling` branch. Its inputs are `obs`
+(`[1, 120]`), `squat_enabled`, and `squat_state_in` (`[1, 3]`); every call
+returns actions for the 20 non-head joints, `squat_state_out`, and the next
+reference arrays. Deployment feeds the returned state and references into the
+next control step without interpreting the state machine, holds both head
+joints at zero, and restores the standing state `[0, 0, 1]` plus the embedded
+frame-zero reference each time the sit policy is selected. Standing means the
+trajectory state has returned to `[0, 0, 1]`. The sit policy has no
+orientation safety fallback and uses only the gains embedded in its ONNX
+metadata.
 
 ## Gain overrides
 
@@ -134,7 +150,7 @@ pixi run lint
 pixi run ros-build
 ```
 
-The tracked policy artifacts are `tasks/walk/models/gait_history.onnx` and
-`tasks/squat/models/squat.onnx`. Their metadata is validated at startup and is
+The tracked policy artifacts are `tasks/walk/models/gait_history.onnx`,
+`tasks/squat/models/squat.onnx`, and `tasks/sit/models/sit.onnx`. Their metadata is validated at startup and is
 the source of truth for observation layout, joint order, default positions,
 gains, and action scaling.

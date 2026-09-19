@@ -23,6 +23,7 @@ class FakeController:
         self.robot.data.root_quat_w = torch.tensor([1.0, 0.0, 0.0, 0.0])
         self.robot.data.joint_pos = self.robot.default_joint_pos.clone()
         self.squat_enabled = False
+        self.pose_policy = "squat"
         self.velocity_command = (0.0, 0.0, 0.0)
         self.head_target = (0.0, 0.0)
         self.stopped = False
@@ -177,6 +178,38 @@ class WalkPolicyTest(unittest.TestCase):
         self.assertTrue(self.policy.squat_cycle_complete())
         self.policy.inference()
         self.assertFalse(self.policy.is_squat_active())
+        self.assertTrue(
+            torch.equal(self.controller.robot.joint_stiffness, walk_stiffness)
+        )
+
+    def test_x_command_switches_to_sit_policy(self) -> None:
+        walk_stiffness = self.policy.joint_stiffness.clone()
+        self.controller.pose_policy = "sit"
+        self.controller.squat_enabled = True
+        targets = self.policy.inference()
+        self.assertTrue(self.policy.is_sit_active())
+        self.assertFalse(self.policy.is_squat_active())
+        self.assertEqual(tuple(targets.shape), (22,))
+        self.assertTrue(bool(torch.isfinite(targets).all()))
+        self.assertTrue(
+            torch.equal(
+                self.controller.robot.joint_stiffness,
+                self.policy.sit_policy.joint_stiffness,
+            )
+        )
+        for _ in range(5):
+            self.policy.inference()
+        self.assertTrue(self.policy.squat_has_started())
+
+        # Standing runs the sit trajectory back to its sentinel before walking.
+        self.controller.squat_enabled = False
+        for _ in range(2000):
+            self.policy.inference()
+            if self.policy.squat_cycle_complete():
+                break
+        self.assertTrue(self.policy.squat_cycle_complete())
+        self.policy.inference()
+        self.assertFalse(self.policy.is_sit_active())
         self.assertTrue(
             torch.equal(self.controller.robot.joint_stiffness, walk_stiffness)
         )

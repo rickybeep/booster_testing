@@ -22,7 +22,11 @@ from .booster_workflow import create_squat_workflow, create_walk_squat_workflow
 from ..utils.synced_array import SyncedArray
 from ..utils.metrics import SyncedMetrics
 from ..utils.isaaclab import math as lab_math
-from ..utils.remote_control_service import RemoteControlService
+from ..utils.remote_control_service import (
+    POSE_POLICIES,
+    SQUAT_POLICY,
+    RemoteControlService,
+)
 
 
 logger = logging.getLogger("booster_deploy")
@@ -153,6 +157,8 @@ class BoosterRobotPortal:
         command_dtype = np.dtype(
             [
                 ("squat_enabled", np.bool_),
+                # Index into POSE_POLICIES.
+                ("pose_policy", np.uint8),
                 ("velocity", np.float32, (3,)),
                 ("head_target", np.float32, (2,)),
             ]
@@ -286,6 +292,9 @@ class BoosterRobotPortal:
             cmd[0]["squat_enabled"] = (
                 self.remoteControlService.get_squat_enabled()
             )
+            cmd[0]["pose_policy"] = POSE_POLICIES.index(
+                self.remoteControlService.get_pose_policy()
+            )
             cmd[0]["head_target"] = self.remoteControlService.get_head_target()
             if self.current_mode == RobotMode.CUSTOM:
                 cmd[0]["velocity"] = (
@@ -399,21 +408,26 @@ class BoosterRobotPortal:
         self.logger.info("Learned walk command ready; requesting custom mode")
         self.client.change_mode(RobotMode.CUSTOM)
 
-    def request_crouch(self) -> None:
+    def request_crouch(self, pose_policy: str = SQUAT_POLICY) -> None:
         self.squat_started_event.clear()
         self.standing_pose_event.clear()
-        self._set_squat_command(True)
-        self.logger.info("B pressed; switching from walk policy to squat policy")
+        self._set_squat_command(True, pose_policy)
+        self.logger.info("Switching from walk policy to %s policy", pose_policy)
 
     def request_stand(self) -> None:
         self._set_squat_command(False)
-        self.logger.info("B pressed; standing before resuming learned walking")
+        self.logger.info("Standing before resuming learned walking")
 
-    def _set_squat_command(self, enabled: bool) -> None:
+    def _set_squat_command(
+        self, enabled: bool, pose_policy: str | None = None
+    ) -> None:
         """Update both command sources before the next inference frame."""
-        self.remoteControlService.set_squat_enabled(enabled)
+        self.remoteControlService.set_squat_enabled(enabled, pose_policy)
         command = np.zeros((1,), dtype=self.synced_command.dtype)
         command[0]["squat_enabled"] = enabled
+        command[0]["pose_policy"] = POSE_POLICIES.index(
+            self.remoteControlService.get_pose_policy()
+        )
         command[0]["head_target"] = self.remoteControlService.get_head_target()
         if self.current_mode == RobotMode.CUSTOM:
             command[0]["velocity"] = (
@@ -439,7 +453,7 @@ class BoosterRobotPortal:
             max_velocity <= self.cfg.booster.standing_joint_velocity_tolerance
         )
 
-    def consume_crouch_request(self) -> bool:
+    def consume_crouch_request(self) -> str | None:
         return self.remoteControlService.consume_crouch_request()
 
     def discard_crouch_request(self) -> None:
@@ -591,6 +605,7 @@ class BoosterRobotController(BaseController):
     def update_policy_command(self):
         cmd = self.portal.synced_command.read()[0]
         self.squat_enabled = bool(cmd["squat_enabled"])
+        self.pose_policy = POSE_POLICIES[int(cmd["pose_policy"])]
         self.velocity_command = tuple(float(value) for value in cmd["velocity"])
         self.head_target = tuple(float(value) for value in cmd["head_target"])
 

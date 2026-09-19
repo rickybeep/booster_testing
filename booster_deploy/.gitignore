@@ -5,6 +5,8 @@ tasks/*/motions/
 !tasks/squat/models/squat.onnx
 !tasks/walk/models/
 !tasks/walk/models/walk.onnx
+!tasks/sit/models/
+!tasks/sit/models/sit.onnx
 .DS_Store
 
 # Local ROS workspace build products

@@ -235,6 +235,7 @@ class MujocoController(BaseController):
                 sleep(self.cfg.mujoco.physics_dt * self.cfg.mujoco.decimation)
                 self.update_state()
                 self.squat_enabled = self.remote_control.get_squat_enabled()
+                self.pose_policy = self.remote_control.get_pose_policy()
                 dof_targets = self.policy_step()
                 self.ctrl_step(dof_targets)
 
