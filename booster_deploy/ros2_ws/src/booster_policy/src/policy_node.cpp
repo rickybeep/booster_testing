@@ -35,6 +35,18 @@ std::vector<float> ToFloats(const std::vector<double>& values) {
   return std::vector<float>(values.begin(), values.end());
 }
 
+uint8_t ToStatusPolicy(ActivePolicy policy) {
+  switch (policy) {
+    case ActivePolicy::kSquat:
+      return StatusMsg::POLICY_SQUAT;
+    case ActivePolicy::kSit:
+      return StatusMsg::POLICY_SIT;
+    case ActivePolicy::kWalk:
+      break;
+  }
+  return StatusMsg::POLICY_WALK;
+}
+
 // Runs the policies at the policy rate and publishes `joint_ctrl`.
 //
 // Subscriptions and services run on the executor; inference runs on a
@@ -60,6 +72,7 @@ class PolicyNode : public rclcpp::Node {
     config.squat_model_path = declare_parameter<std::string>("squat_model_path", "");
     config.squat_gain_overrides_path =
         declare_parameter<std::string>("squat_gain_overrides_path", "");
+    config.sit_model_path = declare_parameter<std::string>("sit_model_path", "");
     config.enable_safety_fallback = declare_parameter<bool>("enable_safety_fallback", true);
     config.min_upright_projection =
         static_cast<float>(declare_parameter<double>("min_upright_projection", 0.5));
@@ -166,6 +179,8 @@ class PolicyNode : public rclcpp::Node {
       std::lock_guard<std::mutex> lock(mutex_);
       std::copy(msg.imu_state.gyro.begin(), msg.imu_state.gyro.end(),
                 state_.angular_velocity.begin());
+      state_.root_quat =
+          QuaternionFromRpy(msg.imu_state.rpy[0], msg.imu_state.rpy[1], msg.imu_state.rpy[2]);
       state_.projected_gravity =
           ProjectedGravityFromRpy(msg.imu_state.rpy[0], msg.imu_state.rpy[1], msg.imu_state.rpy[2]);
       float max_speed = 0.0F;
@@ -191,6 +206,15 @@ class PolicyNode : public rclcpp::Node {
     command_.velocity = {msg.vx, msg.vy, msg.yaw_rate};
     command_.head_target = {msg.head_yaw, msg.head_pitch};
     command_.squat = msg.squat;
+    if (msg.pose_policy == CommandMsg::POSE_SIT) {
+      command_.pose = PosePolicy::kSit;
+    } else {
+      if (msg.pose_policy != CommandMsg::POSE_SQUAT) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                             "Unknown pose_policy %u; using squat", msg.pose_policy);
+      }
+      command_.pose = PosePolicy::kSquat;
+    }
     last_command_time_ = Clock::now();
   }
 
@@ -316,9 +340,7 @@ class PolicyNode : public rclcpp::Node {
           ready_ = low_cmd_publisher_->get_subscription_count() > 0;
           inference_ms_ = inference_ms;
           ++step_;
-          active_policy_ = controller_->active_policy() == ActivePolicy::kSquat
-                               ? StatusMsg::POLICY_SQUAT
-                               : StatusMsg::POLICY_WALK;
+          active_policy_ = ToStatusPolicy(controller_->active_policy());
           squat_started_ = controller_->squat_started();
           standing_pose_complete_ = controller_->standing_pose_complete();
           if (controller_->upright_fault()) {

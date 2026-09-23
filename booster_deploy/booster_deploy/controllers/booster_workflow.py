@@ -10,7 +10,9 @@ class WalkSquatWorkflowContext(Protocol):
 
     def discard_crouch_request(self) -> None: ...
 
-    def consume_crouch_request(self) -> bool: ...
+    def consume_crouch_request(self) -> str | None:
+        """Pop a pending button edge; returns the pose policy it maps to."""
+        ...
 
     def begin_policy(self) -> bool: ...
 
@@ -20,7 +22,7 @@ class WalkSquatWorkflowContext(Protocol):
 
     def squat_is_commanded(self) -> bool: ...
 
-    def request_crouch(self) -> None: ...
+    def request_crouch(self, pose_policy: str) -> None: ...
 
     def request_stand(self) -> None: ...
 
@@ -127,7 +129,7 @@ class _EnterCustom(py_trees.behaviour.Behaviour):
 
 class _RunPolicies(py_trees.behaviour.Behaviour):
     def __init__(self, context: WalkSquatWorkflowContext, custom: Any):
-        super().__init__(name="Run learned walk and squat policies")
+        super().__init__(name="Run learned walk, squat and sit policies")
         self.context = context
         self.custom = custom
 
@@ -139,11 +141,14 @@ class _RunPolicies(py_trees.behaviour.Behaviour):
     def update(self) -> py_trees.common.Status:
         if self.context.current_mode != self.custom:
             return py_trees.common.Status.FAILURE
-        if self.context.consume_crouch_request():
+        pose_policy = self.context.consume_crouch_request()
+        if pose_policy:
+            # B selects squat and X selects sit while walking; either button
+            # stands the active pose back up before walking resumes.
             if self.context.squat_is_commanded():
                 self.context.request_stand()
             else:
-                self.context.request_crouch()
+                self.context.request_crouch(pose_policy)
         return py_trees.common.Status.RUNNING
 
 

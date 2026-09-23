@@ -32,6 +32,45 @@ class RemoteControlServiceTest(unittest.TestCase):
         service._handle_keyboard_press("s")
         self.assertTrue(service.get_squat_enabled())
 
+    def test_sit_button_and_key_request_sit_policy(self) -> None:
+        service = RemoteControlService(
+            controller_available=True,
+            workflow_controls=True,
+            start_head_thread=False,
+        )
+        self.addCleanup(service.close)
+
+        service._handle_keyboard_press("m")
+        self.assertEqual(service.consume_crouch_request(), "sit")
+
+        service.handle_controller_state(SimpleNamespace(a=False, b=False, x=True))
+        service.handle_controller_state(SimpleNamespace(a=False, b=False, x=True))
+        service.handle_controller_state(SimpleNamespace(a=False, b=False, x=False))
+        self.assertEqual(service.consume_crouch_request(), "sit")
+        self.assertIsNone(service.consume_crouch_request())
+
+        service.handle_controller_state(SimpleNamespace(a=False, b=True, x=True))
+        self.assertEqual(service.consume_crouch_request(), "squat")
+        self.assertEqual(service.consume_crouch_request(), "sit")
+        service.discard_crouch_requests()
+        self.assertIsNone(service.consume_crouch_request())
+
+    def test_mujoco_toggle_latches_selected_pose_policy(self) -> None:
+        service = RemoteControlService(start_head_thread=False)
+        self.addCleanup(service.close)
+        service.arm_squat_toggle()
+
+        service._handle_keyboard_press("m")
+        self.assertTrue(service.get_squat_enabled())
+        self.assertEqual(service.get_pose_policy(), "sit")
+        # Any pose key stands; the running pose policy stays selected.
+        service._handle_keyboard_press("s")
+        self.assertFalse(service.get_squat_enabled())
+        self.assertEqual(service.get_pose_policy(), "sit")
+        service._handle_keyboard_press("s")
+        self.assertTrue(service.get_squat_enabled())
+        self.assertEqual(service.get_pose_policy(), "squat")
+
     def test_joystick_axes_match_walk_policy_commands(self) -> None:
         service = RemoteControlService(controller_available=True)
         self.addCleanup(service.close)

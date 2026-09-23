@@ -8,7 +8,7 @@ import mujoco
 import mujoco.viewer
 import booster_policy_core
 from ..policy_node import make_policy_controller
-from ..utils.remote_control_service import RemoteControlService
+from ..utils.remote_control_service import SIT_POLICY, RemoteControlService
 from .controller_cfg import ControllerCfg
 
 
@@ -139,6 +139,11 @@ class MujocoController:
         gravity = booster_policy_core.projected_gravity_from_quaternion(
             *(float(value) for value in qpos[3:7])
         )
+        pose = (
+            booster_policy_core.PosePolicy.SIT
+            if self.remote_control.get_pose_policy() == SIT_POLICY
+            else booster_policy_core.PosePolicy.SQUAT
+        )
         self._step_count += 1
         targets = self.policy.step(
             qvel[3:6],
@@ -148,6 +153,8 @@ class MujocoController:
             (0.0, 0.0, 0.0),
             (0.0, 0.0),
             self.remote_control.get_squat_enabled(),
+            pose,
+            qpos[3:7],
         )
         if self.policy.upright_fault:
             print("\nLarge orientation error detected; stopping policy.")

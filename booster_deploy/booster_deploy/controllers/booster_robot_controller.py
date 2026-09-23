@@ -15,7 +15,11 @@ from .controller_cfg import ControllerCfg
 from .booster_workflow import create_squat_workflow, create_walk_squat_workflow
 from ..policy_client import PolicyClient
 from ..policy_node import PolicyNodeProcess
-from ..utils.remote_control_service import RemoteControlService
+from ..utils.remote_control_service import (
+    SIT_POLICY,
+    SQUAT_POLICY,
+    RemoteControlService,
+)
 
 
 logger = logging.getLogger("booster_deploy")
@@ -161,13 +165,16 @@ class BoosterRobotPortal:
         self.logger.info("Learned walk command ready; requesting custom mode")
         self.client.change_mode(RobotMode.CUSTOM)
 
-    def request_crouch(self) -> None:
-        self.policy.squat()
-        self.logger.info("B pressed; switching from walk policy to squat policy")
+    def request_crouch(self, pose_policy: str = SQUAT_POLICY) -> None:
+        if pose_policy == SIT_POLICY:
+            self.policy.sit()
+        else:
+            self.policy.squat()
+        self.logger.info("Switching from walk policy to %s policy", pose_policy)
 
     def request_stand(self) -> None:
         self.policy.stand()
-        self.logger.info("B pressed; standing before resuming learned walking")
+        self.logger.info("Standing before resuming learned walking")
 
     def squat_is_commanded(self) -> bool:
         return self.policy.squat_commanded
@@ -186,7 +193,7 @@ class BoosterRobotPortal:
             <= self.cfg.booster.standing_joint_velocity_tolerance
         )
 
-    def consume_crouch_request(self) -> bool:
+    def consume_crouch_request(self) -> str | None:
         return self.remoteControlService.consume_crouch_request()
 
     def discard_crouch_request(self) -> None:
@@ -258,7 +265,7 @@ class BoosterRobotPortal:
         self.logger.info("Cleanup complete")
 
     def run(self):
-        """Tick the walk/squat workflow at 10 Hz."""
+        """Tick the walk/squat/sit workflow at 10 Hz."""
 
         print("Initialization complete.")
         print(self.remoteControlService.get_operation_hint())

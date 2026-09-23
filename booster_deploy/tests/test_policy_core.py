@@ -209,6 +209,160 @@ class SquatPolicyTest(unittest.TestCase):
         self.assertFalse(policy.standing_pose_complete)
 
 
+def _quat_mul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = a
+    w2, x2, y2, z2 = b
+    return np.asarray(
+        [
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ]
+    )
+
+
+def _quat_inv(q: np.ndarray) -> np.ndarray:
+    return np.asarray([q[0], -q[1], -q[2], -q[3]]) / np.dot(q, q)
+
+
+def _yaw_inv(q: np.ndarray) -> np.ndarray:
+    yaw = math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2))
+    return _quat_inv(np.asarray([math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)]))
+
+
+def _matrix(q: np.ndarray) -> np.ndarray:
+    w, x, y, z = q
+    s = 2 / np.dot(q, q)
+    return np.asarray(
+        [
+            [1 - s * (y * y + z * z), s * (x * y - z * w), s * (x * z + y * w)],
+            [s * (x * y + z * w), 1 - s * (x * x + z * z), s * (y * z - x * w)],
+            [s * (x * z - y * w), s * (y * z + x * w), 1 - s * (x * x + y * y)],
+        ]
+    )
+
+
+class SitPolicyTest(unittest.TestCase):
+    """Reference implementation ported from the Python sit wrapper."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.session = ort.InferenceSession(
+            str(DEPLOY_ROOT / "tasks/sit/models/sit.onnx"),
+            providers=["CPUExecutionProvider"],
+        )
+        meta = cls.session.get_modelmeta().custom_metadata_map
+        cls.anchor = meta["body_names"].split(",").index(meta["anchor_body_name"])
+        cls.default = _metadata_floats(cls.session, "default_joint_pos")
+        cls.scale = _metadata_floats(cls.session, "action_scale")
+        cls.stiffness = _metadata_floats(cls.session, "joint_stiffness")
+        cls.outputs = [o.name for o in cls.session.get_outputs()]
+
+    def setUp(self) -> None:
+        self.policy = make_policy_controller(K1WalkControllerCfg())
+        self.joint_pos = DEFAULT_POS.copy()
+        self.joint_vel = np.zeros(22, dtype=np.float32)
+
+    def run_model(self, obs, enabled, state):
+        return self.session.run(
+            self.outputs,
+            {
+                "obs": obs[None].astype(np.float32),
+                "squat_enabled": np.asarray([[enabled]], np.float32),
+                "squat_state_in": state,
+            },
+        )
+
+    def step(self, squat: bool, quat=(1.0, 0.0, 0.0, 0.0), gravity=UPRIGHT):
+        return self.policy.step(
+            np.asarray([0.1, -0.2, 0.05], np.float32),
+            gravity,
+            self.joint_pos,
+            self.joint_vel,
+            (0.0, 0.0, 0.0),
+            (0.3, 0.1),
+            squat,
+            core.PosePolicy.SIT,
+            quat,
+        )
+
+    def test_sit_targets_match_onnxruntime(self) -> None:
+        # Frame-zero reference from a disabled standing call.
+        state = np.asarray([[0, 0, 1]], np.int64)
+        seeded = self.run_model(np.zeros(120), 0.0, state)
+        state, ref_pos, ref_vel, ref_quat = seeded[1], seeded[2][0], seeded[3][0], seeded[5][0]
+        ref_yaw_inv = _yaw_inv(ref_quat[self.anchor])
+
+        # Tilted and yawed root; the heading is latched on the first sit step.
+        root = np.asarray([math.cos(0.4), 0.05, 0.08, math.sin(0.4)])
+        root /= np.linalg.norm(root)
+        root_yaw_inv = _yaw_inv(root)
+        gravity = core.projected_gravity_from_quaternion(*root)
+        rng = np.random.default_rng(5)
+        last_action = np.zeros(20, np.float32)
+        for _ in range(4):
+            self.joint_pos = (DEFAULT_POS + rng.normal(0, 0.05, 22)).astype(np.float32)
+            self.joint_vel = rng.normal(0, 0.5, 22).astype(np.float32)
+            targets, stiffness, _ = self.step(True, root, gravity)
+            self.assertEqual(self.policy.active_policy, core.ActivePolicy.SIT)
+
+            relative = _quat_mul(
+                _quat_inv(_quat_mul(root_yaw_inv, root)),
+                _quat_mul(ref_yaw_inv, ref_quat[self.anchor]),
+            )
+            obs = np.concatenate(
+                [
+                    ref_pos,
+                    ref_vel,
+                    _matrix(relative)[:, :2].flatten(),
+                    [0.1, -0.2, 0.05],
+                    self.joint_pos - self.default,
+                    self.joint_vel,
+                    last_action,
+                    gravity,
+                ]
+            )
+            results = self.run_model(obs, 1.0, state)
+            last_action = results[0][0]
+            state, ref_pos, ref_vel, ref_quat = (
+                results[1], results[2][0], results[3][0], results[5][0]
+            )
+            expected = self.default.copy()
+            expected[2:] += self.scale * last_action
+            expected[:2] = 0.0  # Head held at zero, ignoring the head target.
+            np.testing.assert_allclose(targets, expected, atol=1e-4)
+            np.testing.assert_array_equal(stiffness, self.stiffness)
+        self.assertTrue(self.policy.squat_started)
+
+    def test_sit_cycle_returns_to_walk(self) -> None:
+        walk_stiffness, _ = self.policy.walk_gains
+        for _ in range(5):
+            self.step(True)
+        self.assertEqual(self.policy.active_policy, core.ActivePolicy.SIT)
+        self.assertTrue(self.policy.squat_started)
+
+        # Standing runs the sit trajectory back to its sentinel before walking.
+        for _ in range(2000):
+            self.step(False)
+            if self.policy.standing_pose_complete:
+                break
+        self.assertTrue(self.policy.standing_pose_complete)
+        _, stiffness, _ = self.step(False)
+        self.assertEqual(self.policy.active_policy, core.ActivePolicy.WALK)
+        np.testing.assert_array_equal(stiffness, walk_stiffness)
+
+    def test_sit_without_model_is_rejected(self) -> None:
+        cfg = K1WalkControllerCfg()
+        cfg.policy.sit_checkpoint_path = None
+        policy = make_policy_controller(cfg)
+        with self.assertRaisesRegex(ValueError, "no sit model"):
+            policy.step(
+                np.zeros(3), UPRIGHT, DEFAULT_POS, np.zeros(22), (0, 0, 0), (0, 0), True,
+                core.PosePolicy.SIT,
+            )
+
+
 class ConfigTest(unittest.TestCase):
     def test_projected_gravity_matches_rpy_rotation(self) -> None:
         roll, pitch, yaw = 0.3, -0.2, 1.1
@@ -218,6 +372,11 @@ class ConfigTest(unittest.TestCase):
             -math.cos(pitch) * math.cos(roll),
         ]
         np.testing.assert_allclose(core.projected_gravity_from_rpy(roll, pitch, yaw), expected, atol=1e-6)
+        np.testing.assert_allclose(
+            core.projected_gravity_from_quaternion(*core.quaternion_from_rpy(roll, pitch, yaw)),
+            expected,
+            atol=1e-6,
+        )
         half = yaw / 2
         np.testing.assert_allclose(
             core.projected_gravity_from_quaternion(math.cos(half), 0, 0, math.sin(half)),

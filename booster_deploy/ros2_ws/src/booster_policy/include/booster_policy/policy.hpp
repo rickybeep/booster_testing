@@ -11,7 +11,8 @@
 
 namespace booster_policy {
 
-// Both policies control all 22 K1 joints, including the head.
+// Walk and squat control all 22 K1 joints, including the head; sit holds the
+// head at zero and controls the other 20.
 inline constexpr std::size_t kPolicyJointCount = 22;
 
 // Walk policy layout: 50 frames of angular velocity (3), projected gravity (3),
@@ -26,8 +27,17 @@ inline constexpr float kMaxYawRate = 2.5F;
 inline constexpr std::size_t kSquatObservationSize = 73;
 inline constexpr float kSquatHeadActionScaleMultiplier = 0.1F;
 
+// Sit policy layout: reference joint positions and velocities (44), anchor
+// orientation error (6), angular velocity (3), joint position offsets (22),
+// joint velocities (22), previous actions (20), and projected gravity (3).
+inline constexpr std::size_t kSitObservationSize = 120;
+inline constexpr std::size_t kSitActionCount = 20;
+inline constexpr std::size_t kSitStateSize = 3;
+
 enum class PolicyMode { kWalk, kSquat };
-enum class ActivePolicy { kWalk, kSquat };
+enum class ActivePolicy { kWalk, kSquat, kSit };
+// Pose policy a walk-mode crouch command switches to.
+enum class PosePolicy { kSquat, kSit };
 
 // Joint arrays use the robot message order given by `joint_names`.
 struct RobotConfig {
@@ -38,14 +48,16 @@ struct RobotConfig {
 };
 
 struct PolicyConfig {
-  // kWalk runs the joystick gait and switches to the squat policy on command;
-  // kSquat runs the squat policy by itself.
+  // kWalk runs the joystick gait and switches to the squat or sit policy on
+  // command; kSquat runs the squat policy by itself.
   PolicyMode mode = PolicyMode::kWalk;
   std::string walk_model_path;
   // Empty paths disable file-based gain overrides.
   std::string walk_gain_overrides_path;
   std::string squat_model_path;
   std::string squat_gain_overrides_path;
+  // Walk mode only; empty leaves sit unavailable. Sit uses its ONNX gains.
+  std::string sit_model_path;
   bool enable_safety_fallback = true;
   // Smallest upright gravity projection tolerated before faulting; 0.5 is
   // roughly 60 degrees of trunk tilt.
@@ -59,6 +71,8 @@ struct PolicyConfig {
 struct RobotState {
   std::array<float, 3> angular_velocity{};  // Base frame, rad/s.
   std::array<float, 3> projected_gravity{0.0F, 0.0F, -1.0F};
+  // World-from-base (w, x, y, z); only the sit policy uses it.
+  std::array<float, 4> root_quat{1.0F, 0.0F, 0.0F, 0.0F};
   std::vector<float> joint_pos;
   std::vector<float> joint_vel;
 };
@@ -66,7 +80,9 @@ struct RobotState {
 struct PolicyCommand {
   std::array<float, 3> velocity{};     // vx, vy, yaw rate.
   std::array<float, 2> head_target{};  // Yaw, pitch.
+  // True switches to `pose` and crouches or sits; false stands up again.
   bool squat = false;
+  PosePolicy pose = PosePolicy::kSquat;
 };
 
 struct JointCommand {
@@ -75,12 +91,14 @@ struct JointCommand {
   std::vector<float> damping;
 };
 
+// World-from-base (w, x, y, z) for IMU roll/pitch/yaw in the XYZ convention.
+std::array<float, 4> QuaternionFromRpy(float roll, float pitch, float yaw);
 // Gravity in the base frame for IMU roll/pitch/yaw in the XYZ convention.
 std::array<float, 3> ProjectedGravityFromRpy(float roll, float pitch, float yaw);
 // Gravity in the base frame for a (w, x, y, z) world-from-base quaternion.
 std::array<float, 3> ProjectedGravityFromQuaternion(float w, float x, float y, float z);
 
-// ONNX session with preallocated float input and output tensors.
+// ONNX session with preallocated float or int64 input and output tensors.
 class OnnxModel {
  public:
   OnnxModel(const std::string& path, const std::string& label, int threads);
@@ -91,12 +109,18 @@ class OnnxModel {
   const std::vector<std::string>& output_names() const { return output_names_; }
   const std::vector<std::vector<int64_t>>& input_shapes() const { return input_shapes_; }
   const std::vector<std::vector<int64_t>>& output_shapes() const { return output_shapes_; }
+  const std::vector<ONNXTensorElementDataType>& input_types() const { return input_types_; }
+  const std::vector<ONNXTensorElementDataType>& output_types() const { return output_types_; }
 
   // Allocates the input and output buffers once the shapes are validated.
   void BindBuffers();
-  std::vector<float>& input(std::size_t index) { return inputs_.at(index); }
-  const std::vector<float>& input(std::size_t index) const { return inputs_.at(index); }
-  const std::vector<float>& output(std::size_t index) const { return outputs_.at(index); }
+  // Typed buffer access; throws if the tensor has a different element type.
+  std::vector<float>& input(std::size_t index);
+  const std::vector<float>& input(std::size_t index) const;
+  const std::vector<float>& output(std::size_t index) const;
+  std::vector<int64_t>& int64_input(std::size_t index);
+  const std::vector<int64_t>& int64_input(std::size_t index) const;
+  const std::vector<int64_t>& int64_output(std::size_t index) const;
   void Run();
 
  private:
@@ -107,8 +131,13 @@ class OnnxModel {
   std::vector<std::string> output_names_;
   std::vector<std::vector<int64_t>> input_shapes_;
   std::vector<std::vector<int64_t>> output_shapes_;
+  std::vector<ONNXTensorElementDataType> input_types_;
+  std::vector<ONNXTensorElementDataType> output_types_;
+  // One slot per tensor; only the vector matching its element type is used.
   std::vector<std::vector<float>> inputs_;
   std::vector<std::vector<float>> outputs_;
+  std::vector<std::vector<int64_t>> int64_inputs_;
+  std::vector<std::vector<int64_t>> int64_outputs_;
   std::vector<Ort::Value> input_values_;
   std::vector<Ort::Value> output_values_;
   std::vector<const char*> input_name_ptrs_;
@@ -143,7 +172,49 @@ class SquatPolicy {
   bool upright_violation_ = false;
 };
 
-// History-encoder joystick gait with an in-process squat policy.
+// Stateful deployment wrapper for the sit motion-tracking ONNX.
+//
+// The model carries its own trajectory state machine and returns the next
+// reference frame on every call; deployment only feeds the returned state and
+// reference back in. It has no orientation safety fallback.
+class SitPolicy {
+ public:
+  explicit SitPolicy(const PolicyConfig& config);
+
+  // Restores the standing state and the embedded frame-zero reference.
+  void Reset();
+  const JointCommand& Step(const RobotState& state, bool sit);
+  // Standing means the trajectory state is back at its [0, 0, 1] sentinel.
+  bool IsStandingPose() const;
+  const JointCommand& gains() const { return command_; }
+
+ private:
+  void ValidateModel() const;
+  void ValidateRobotConfig() const;
+  // Feeds the returned state back in and latches the next reference frame.
+  void LatchOutputs();
+
+  const PolicyConfig& config_;
+  OnnxModel model_;
+  std::size_t anchor_index_ = 0;
+  std::vector<std::size_t> policy_to_robot_;
+  // Policy joint index for each of the 20 action slots.
+  std::vector<std::size_t> action_to_policy_;
+  std::vector<std::size_t> head_indices_;
+  std::vector<float> default_joint_pos_;
+  std::vector<float> action_scale_;
+  std::vector<float> last_action_;
+  std::vector<float> ref_joint_pos_;
+  std::vector<float> ref_joint_vel_;
+  std::array<float, 4> ref_anchor_quat_{};
+  std::array<float, 4> init_reference_yaw_inv_{};
+  std::array<float, 4> init_root_yaw_inv_{};
+  // The root heading is latched on the first step after a reset.
+  bool root_yaw_initialized_ = false;
+  JointCommand command_;
+};
+
+// History-encoder joystick gait with in-process squat and sit policies.
 class WalkPolicy {
  public:
   explicit WalkPolicy(const PolicyConfig& config);
@@ -162,17 +233,21 @@ class WalkPolicy {
   const std::vector<float>& command_input() const { return model_.input(1); }
   const JointCommand& walk_gains() const { return command_; }
   const JointCommand& squat_gains() const { return squat_.gains(); }
+  bool has_sit() const { return sit_ != nullptr; }
+  // Only available when a sit model is configured.
+  const JointCommand& sit_gains() const;
 
  private:
   void ValidateModel() const;
   void ValidateRobotConfig() const;
   const JointCommand& WalkInference(const RobotState& state, const PolicyCommand& command);
-  void StartSquat();
+  void StartPose(PosePolicy pose);
   void ResumeWalk();
 
   const PolicyConfig& config_;
   OnnxModel model_;
   SquatPolicy squat_;
+  std::unique_ptr<SitPolicy> sit_;
   std::vector<std::size_t> policy_to_robot_;
   std::array<std::size_t, 2> head_indices_{};
   std::vector<float> default_joint_pos_;

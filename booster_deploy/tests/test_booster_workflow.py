@@ -22,17 +22,18 @@ class FakeContext:
         self.ready = False
         self.policy_started = False
         self.squat_commanded = False
+        self.request_policy = "squat"
         self.calls: list[str] = []
 
     def discard_crouch_request(self) -> None:
         self.requests = 0
         self.calls.append("discard")
 
-    def consume_crouch_request(self) -> bool:
+    def consume_crouch_request(self) -> str | None:
         if not self.requests:
-            return False
+            return None
         self.requests -= 1
-        return True
+        return self.request_policy
 
     def begin_policy(self) -> bool:
         if not self.policy_started:
@@ -49,9 +50,9 @@ class FakeContext:
     def squat_is_commanded(self) -> bool:
         return self.squat_commanded
 
-    def request_crouch(self) -> None:
+    def request_crouch(self, pose_policy: str) -> None:
         self.squat_commanded = True
-        self.calls.append("crouch")
+        self.calls.append(f"crouch:{pose_policy}")
 
     def request_stand(self) -> None:
         self.squat_commanded = False
@@ -118,7 +119,25 @@ class WalkSquatWorkflowTest(unittest.TestCase):
 
         self.context.requests = 1
         self.tick()
-        self.assertEqual(self.context.calls[-1], "crouch")
+        self.assertEqual(self.context.calls[-1], "crouch:squat")
+        self.context.requests = 1
+        self.tick()
+        self.assertEqual(self.context.calls[-1], "stand")
+
+    def test_x_sits_and_any_button_stands(self) -> None:
+        self.context.current_mode = Mode.WALKING
+        self.context.ready = True
+        self.context.requests = 1
+        self.tick()
+        self.context.current_mode = Mode.CUSTOM
+        self.tick()
+
+        self.context.request_policy = "sit"
+        self.context.requests = 1
+        self.tick()
+        self.assertEqual(self.context.calls[-1], "crouch:sit")
+
+        self.context.request_policy = "squat"
         self.context.requests = 1
         self.tick()
         self.assertEqual(self.context.calls[-1], "stand")

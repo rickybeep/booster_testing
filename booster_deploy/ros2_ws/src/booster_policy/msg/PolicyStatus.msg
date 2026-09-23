@@ -4,6 +4,7 @@ uint8 STATE_FAULT=2
 
 uint8 POLICY_WALK=0
 uint8 POLICY_SQUAT=1
+uint8 POLICY_SIT=2
 
 builtin_interfaces/Time stamp
 

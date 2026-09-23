@@ -10,5 +10,10 @@ float32 yaw_rate
 float32 head_yaw
 float32 head_pitch
 
-# True switches to the squat policy and crouches; false stands up again.
+uint8 POSE_SQUAT=0
+uint8 POSE_SIT=1
+
+# True switches to the `pose_policy` policy and crouches or sits; false stands
+# up again. The pose is latched until walking resumes.
 bool squat
+uint8 pose_policy

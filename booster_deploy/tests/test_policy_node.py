@@ -84,7 +84,7 @@ class PolicyNodeTest(unittest.TestCase):
         msg.motor_state_serial = [MotorState(q=float(q), dq=0.0) for q in self.default_pos]
         self.low_state_pub.publish(msg)
 
-    def test_start_walk_squat_stand_and_stop(self) -> None:
+    def test_start_walk_squat_sit_stand_and_stop(self) -> None:
         self.client.start(timeout=10.0)
         self.assertTrue(self.client.is_ready())
         self.assertTrue(wait_for(lambda: len(self.low_cmds) > 5))
@@ -104,6 +104,12 @@ class PolicyNodeTest(unittest.TestCase):
         self.client.stand()
         self.assertTrue(wait_for(lambda: self.client.standing_pose_complete))
         self.assertTrue(wait_for(lambda: not self.client.squat_active))
+
+        self.client.sit()
+        self.assertTrue(wait_for(lambda: self.client.sit_active and self.client.squat_started))
+        self.client.stand()
+        self.assertTrue(wait_for(lambda: self.client.standing_pose_complete, timeout=30.0))
+        self.assertTrue(wait_for(lambda: not self.client.sit_active))
 
         self.assertTrue(self.client.stop())
         count = len(self.low_cmds)

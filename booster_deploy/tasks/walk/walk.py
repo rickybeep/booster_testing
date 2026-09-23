@@ -11,7 +11,7 @@ from booster_deploy.utils.isaaclab.configclass import configclass
 
 @configclass
 class K1WalkControllerCfg(ControllerCfg):
-    """History-encoder joystick gait with an in-process squat policy.
+    """History-encoder joystick gait with in-process squat and sit policies.
 
     Inference runs in the C++ `booster_policy` node; see `PolicyCfg`.
     """

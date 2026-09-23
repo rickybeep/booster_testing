@@ -68,13 +68,15 @@ class PolicyCfg:
     file-based overrides for that policy.
     """
 
-    # "walk" runs the joystick gait and switches to squat on command; "squat"
-    # runs the squat policy by itself.
+    # "walk" runs the joystick gait and switches to squat or sit on command;
+    # "squat" runs the squat policy by itself.
     mode: str = MISSING
     walk_checkpoint_path: Optional[str] = None
     walk_gain_overrides_path: Optional[str] = None
     squat_checkpoint_path: str = "tasks/squat/models/squat.onnx"
     squat_gain_overrides_path: Optional[str] = "tasks/squat/gain_overrides.json"
+    # Walk mode only; None leaves sit unavailable. Sit uses its ONNX gains.
+    sit_checkpoint_path: Optional[str] = "tasks/sit/models/sit.onnx"
     enable_safety_fallback: bool = True
     # Smallest upright gravity projection tolerated before the policy stops;
     # 0.5 is roughly 60 degrees of trunk tilt.

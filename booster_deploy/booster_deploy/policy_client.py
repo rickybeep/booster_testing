@@ -1,4 +1,4 @@
-"""Python API for the C++ `booster_policy` walk and squat node."""
+"""Python API for the C++ `booster_policy` walk, squat and sit node."""
 from __future__ import annotations
 
 import logging
@@ -24,7 +24,7 @@ logger = logging.getLogger("booster_deploy")
 class PolicyClient:
     """Start, stop, and command the `booster_policy` node.
 
-    The client latches the velocity, head, and squat command and publishes it
+    The client latches the velocity, head, and pose command and publishes it
     every `heartbeat_period`; the node zeroes the velocity when commands stop
     arriving. Pass `heartbeat_period=None` and call `publish_command()` to
     publish on your own schedule instead.
@@ -42,7 +42,7 @@ class PolicyClient:
             policy.start()
             policy.set_velocity(0.3, 0.0, 0.0)
             time.sleep(2.0)
-            policy.squat()
+            policy.squat()  # or policy.sit()
     """
 
     def __init__(
@@ -201,14 +201,23 @@ class PolicyClient:
             self._command.head_yaw = float(yaw)
             self._command.head_pitch = float(pitch)
 
-    def set_squat(self, enabled: bool) -> None:
-        """Switch to the squat policy and crouch, or stand and resume walking."""
+    def set_squat(self, enabled: bool, pose_policy: int | None = None) -> None:
+        """Switch to a pose policy and crouch or sit, or stand and resume walking.
+
+        `pose_policy` is `PolicyCommand.POSE_SQUAT` or `POSE_SIT`; None keeps
+        the current selection. The node latches the pose until walking resumes.
+        """
         with self._lock:
             self._command.squat = bool(enabled)
+            if pose_policy is not None:
+                self._command.pose_policy = pose_policy
         self.publish_command()
 
     def squat(self) -> None:
-        self.set_squat(True)
+        self.set_squat(True, PolicyCommand.POSE_SQUAT)
+
+    def sit(self) -> None:
+        self.set_squat(True, PolicyCommand.POSE_SIT)
 
     def stand(self) -> None:
         self.set_squat(False)
@@ -229,6 +238,7 @@ class PolicyClient:
                 head_yaw=self._command.head_yaw,
                 head_pitch=self._command.head_pitch,
                 squat=self._command.squat,
+                pose_policy=self._command.pose_policy,
             )
         self._command_publisher.publish(command)
 
@@ -277,6 +287,11 @@ class PolicyClient:
     def squat_active(self) -> bool:
         status = self.status
         return status is not None and status.active_policy == PolicyStatus.POLICY_SQUAT
+
+    @property
+    def sit_active(self) -> bool:
+        status = self.status
+        return status is not None and status.active_policy == PolicyStatus.POLICY_SIT
 
     @property
     def squat_started(self) -> bool:
