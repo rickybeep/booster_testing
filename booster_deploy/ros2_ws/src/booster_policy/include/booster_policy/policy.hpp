@@ -17,11 +17,12 @@ inline constexpr std::size_t kPolicyJointCount = 22;
 
 // Walk policy layout: 50 frames of angular velocity (3), projected gravity (3),
 // joint position offsets (22), joint velocities (22), and previous actions (22).
+// Head position and velocity are zeroed in the observation.
 inline constexpr std::size_t kWalkHistoryLength = 50;
 inline constexpr std::size_t kWalkObservationSize = 72;
 inline constexpr std::size_t kWalkCommandSize = 3;
 inline constexpr float kMaxTranslationalSpeed = 1.5F;
-inline constexpr float kMaxYawRate = 2.5F;
+inline constexpr float kMaxYawRate = 2.4F;
 
 // Squat policy layout: the walk frame followed by a scalar squat command.
 inline constexpr std::size_t kSquatObservationSize = 73;
@@ -250,6 +251,8 @@ class WalkPolicy {
   std::unique_ptr<SitPolicy> sit_;
   std::vector<std::size_t> policy_to_robot_;
   std::array<std::size_t, 2> head_indices_{};
+  // Head joint positions in the model's joint order.
+  std::array<std::size_t, 2> head_policy_indices_{};
   std::vector<float> default_joint_pos_;
   std::vector<float> action_scale_;
   std::vector<float> last_action_;

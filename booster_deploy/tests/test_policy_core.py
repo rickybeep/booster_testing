@@ -35,7 +35,7 @@ class WalkPolicyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.session = ort.InferenceSession(
-            str(DEPLOY_ROOT / "tasks/walk/models/gait_history.onnx"),
+            str(DEPLOY_ROOT / "tasks/walk/models/gait.onnx"),
             providers=["CPUExecutionProvider"],
         )
 
@@ -76,6 +76,14 @@ class WalkPolicyTest(unittest.TestCase):
         history = self.policy.walk_history
         self.assertEqual(history[-2, 0], 0.0)
         self.assertEqual(history[-1, 0], 1.0)
+
+    def test_observation_masks_head_state(self) -> None:
+        self.joint_pos[:2] += 0.3
+        self.joint_vel[:2] = 2.0
+        self.step()
+        history = self.policy.walk_history
+        np.testing.assert_array_equal(history[-1, 6:8], 0.0)
+        np.testing.assert_array_equal(history[-1, 28:30], 0.0)
 
     def test_joystick_command_is_clipped_as_instant_input(self) -> None:
         self.velocity = (3.05, -2.0, 4.0)
@@ -388,7 +396,7 @@ class ConfigTest(unittest.TestCase):
         params = policy_parameters(K1WalkControllerCfg())
         self.assertEqual(params["mode"], "walk")
         self.assertEqual(
-            params["walk_model_path"], str(DEPLOY_ROOT / "tasks/walk/models/gait_history.onnx")
+            params["walk_model_path"], str(DEPLOY_ROOT / "tasks/walk/models/gait.onnx")
         )
         self.assertEqual(len(params["joint_names"]), 22)
         self.assertTrue(all(isinstance(v, float) for v in params["default_joint_pos"]))

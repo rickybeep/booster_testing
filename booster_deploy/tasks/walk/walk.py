@@ -19,7 +19,7 @@ class K1WalkControllerCfg(ControllerCfg):
     robot = K1_CFG
     policy: PolicyCfg = PolicyCfg(
         mode="walk",
-        walk_checkpoint_path="tasks/walk/models/gait_history.onnx",
+        walk_checkpoint_path="tasks/walk/models/gait.onnx",
         walk_gain_overrides_path="tasks/walk/gain_overrides.json",
     )
     mujoco = MujocoControllerCfg(init_pos=[0.0, 0.0, 0.518])

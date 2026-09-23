@@ -19,6 +19,9 @@ namespace {
 const std::array<const char*, 6> kExpectedObservations = {
     "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions", "command",
 };
+const std::array<const char*, 5> kWalkObservations = {
+    "base_ang_vel", "projected_gravity", "joint_pos", "joint_vel", "actions",
+};
 const std::unordered_map<std::string, std::string> kJointAliases = {
     {"Head_Yaw", "AAHead_yaw"},
     {"Head_Pitch", "Head_pitch"},
@@ -716,6 +719,11 @@ WalkPolicy::WalkPolicy(const PolicyConfig& config)
   }
   for (std::size_t i = 0; i < kHeadJoints.size(); ++i) {
     head_indices_[i] = RobotIndex(config_.robot, kHeadJoints[i], "Walk");
+    const auto it = std::find(joint_names.begin(), joint_names.end(), kHeadJoints[i]);
+    if (it == joint_names.end()) {
+      throw std::invalid_argument(std::string("Walk ONNX is missing head joint ") + kHeadJoints[i]);
+    }
+    head_policy_indices_[i] = static_cast<std::size_t>(it - joint_names.begin());
   }
   ValidateRobotConfig();
 
@@ -755,32 +763,27 @@ void WalkPolicy::ValidateModel() const {
     throw std::invalid_argument("Walk ONNX instant must be [1, 3], got " +
                                 ShapeString(model_.input_shapes()[1]));
   }
-  const std::vector<std::string> expected_groups = {"actor", "actor", "actor",
-                                                    "actor", "actor", "actor_command"};
-  if (Csv(model_, "observation_terms_group") != expected_groups) {
-    throw std::invalid_argument("Unexpected walk observation groups");
-  }
   if (Csv(model_, "observation_names") !=
-      std::vector<std::string>(kExpectedObservations.begin(), kExpectedObservations.end())) {
+      std::vector<std::string>(kWalkObservations.begin(), kWalkObservations.end())) {
     throw std::invalid_argument("Unexpected walk observation layout");
   }
   if (Csv(model_, "command_names") != std::vector<std::string>{"twist"}) {
     throw std::invalid_argument("Unexpected walk command layout");
   }
-  if (!AllEqual(FloatCsv(model_, "observation_terms_scale"), std::vector<float>(6, 1.0F))) {
+  if (!AllEqual(FloatCsv(model_, "observation_terms_scale"), std::vector<float>(5, 1.0F))) {
     throw std::invalid_argument("Walk ONNX expects unscaled observations");
   }
-  // Commands are instantaneous; every state term has the full history.
-  const std::vector<float> expected_history = {50, 50, 50, 50, 50, 0};
+  // Commands are fed through `instant`; every state term has the full history.
+  const std::vector<float> expected_history(5, kWalkHistoryLength);
   if (!AllEqual(FloatCsv(model_, "observation_terms_history_length"), expected_history)) {
     throw std::invalid_argument("Unexpected walk history layout");
   }
-  const std::vector<float> expected_flatten = {0, 0, 0, 0, 0, 1};
+  const std::vector<float> expected_flatten(5, 0.0F);
   if (!AllEqual(FloatCsv(model_, "observation_terms_flatten_history_dim"), expected_flatten)) {
     throw std::invalid_argument("Unexpected walk observation flattening");
   }
   const auto clips = Csv(model_, "observation_terms_clip");
-  if (clips != std::vector<std::string>(6, "-inf;inf")) {
+  if (clips != std::vector<std::string>(5, "-inf;inf")) {
     throw std::invalid_argument("Walk ONNX expects observation clipping: " + Join(clips));
   }
   if (Csv(model_, "joint_names").size() != kPolicyJointCount) {
@@ -829,6 +832,12 @@ const JointCommand& WalkPolicy::WalkInference(const RobotState& state,
     obs[6 + i] = state.joint_pos[policy_to_robot_[i]] - default_joint_pos_[i];
     obs[28 + i] = state.joint_vel[policy_to_robot_[i]];
     obs[50 + i] = last_action_[i];
+  }
+  // The gait was trained with the head state masked; the head slots stay in the
+  // action vector but are overridden by the manual head target below.
+  for (const std::size_t i : head_policy_indices_) {
+    obs[6 + i] = 0.0F;
+    obs[28 + i] = 0.0F;
   }
 
   // History frames are chronological; after a reset every frame is the first

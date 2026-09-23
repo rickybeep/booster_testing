@@ -154,7 +154,7 @@ already runs the joystick client.
 
 ## Policy models
 
-The gait and squat models are loaded from `tasks/walk/models/gait_history.onnx` and
+The gait and squat models are loaded from `tasks/walk/models/gait.onnx` and
 `tasks/squat/models/squat.onnx`. Both return 22 joint actions, including the head.
 The sit model is described separately below.
 Deployment maps actions and gains by joint name to all 22 robot message slots,
@@ -163,11 +163,11 @@ supplies the joint order, default pose, gains, and action scales.
 
 The gait model consumes `history` of shape `[1, 50, 72]`: 50 chronological frames
 containing angular velocity (3), projected gravity (3), joint position offsets
-(22), joint velocities (22), and previous model actions (22). Head state is
-included. Velocity commands are supplied separately as `instant` of shape
+(22), joint velocities (22), and previous model actions (22). Head position and
+velocity are zeroed. Velocity commands are supplied separately as `instant` of shape
 `[1, 3]` and do not enter the history. After a reset, deployment fills the history
 with the first frame. The model input clamps forward, backward, and lateral
-velocity independently to `1.5 m/s`, and angular velocity to `2.5 rad/s`.
+velocity independently to `1.5 m/s`, and angular velocity to `2.4 rad/s`.
 
 ## Sit ONNX contract
 
@@ -223,7 +223,7 @@ pixi run test
 `tests/test_policy_node.py` launches the real node with a fake `/low_state`
 publisher and drives it through `PolicyClient`.
 
-The tracked policy artifacts are `tasks/walk/models/gait_history.onnx`,
+The tracked policy artifacts are `tasks/walk/models/gait.onnx`,
 `tasks/squat/models/squat.onnx`, and `tasks/sit/models/sit.onnx`. Their metadata is validated at startup and is
 the source of truth for observation layout, joint order, default positions,
 gains, and action scaling.
