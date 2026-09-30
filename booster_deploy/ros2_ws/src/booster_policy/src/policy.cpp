@@ -39,6 +39,10 @@ const std::vector<std::string> kSitOutputs = {
     "body_pos_w",  "body_quat_w",     "body_lin_vel_w", "body_ang_vel_w",
 };
 const std::array<int64_t, kSitStateSize> kSitStandingState = {0, 0, 1};
+// Trajectory state element 1 is the phase: 1 sitting down, 2 seated (a short
+// idle loop), 3 standing up. Both shipped sit models behave this way.
+constexpr std::size_t kSitPhaseIndex = 1;
+constexpr int64_t kSitSeatedPhase = 2;
 
 // Squat depth shows up almost entirely in these joints: measured in MuJoCo
 // they sit within 0.11 rad of the default pose while standing and 0.85 rad
@@ -560,6 +564,10 @@ SitPolicy::SitPolicy(const PolicyConfig& config)
                         return joint_names[i] == name;
                       }) != kHeadJoints.end();
     (head ? head_indices_ : action_to_policy_).push_back(i);
+    if (joint_names[i].find("Shoulder") != std::string::npos ||
+        joint_names[i].find("Elbow") != std::string::npos) {
+      arm_indices_.push_back(policy_to_robot_[i]);
+    }
   }
   ValidateRobotConfig();
 
@@ -693,7 +701,28 @@ const JointCommand& SitPolicy::Step(const RobotState& state, bool sit) {
   for (const std::size_t i : head_indices_) {
     command_.position[policy_to_robot_[i]] = 0.0F;
   }
+  LimitArmTorque(state, sit);
   return command_;
+}
+
+void SitPolicy::LimitArmTorque(const RobotState& state, bool sit) {
+  // The model may report the seated phase for a few steps after a stand
+  // request, so standing up always gets the move limit.
+  const bool seated = sit && model_.int64_input(2)[kSitPhaseIndex] == kSitSeatedPhase;
+  const float limit =
+      seated ? config_.sit_arm_hold_torque_limit : config_.sit_arm_move_torque_limit;
+  if (!(limit > 0.0F)) {
+    return;
+  }
+  for (const std::size_t r : arm_indices_) {
+    const float stiffness = command_.stiffness[r];
+    if (!(stiffness > 0.0F)) {
+      continue;
+    }
+    const float reach = limit / stiffness;
+    const float measured = state.joint_pos[r];
+    command_.position[r] = std::clamp(command_.position[r], measured - reach, measured + reach);
+  }
 }
 
 bool SitPolicy::IsStandingPose() const {

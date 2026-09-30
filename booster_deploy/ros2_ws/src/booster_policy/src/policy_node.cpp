@@ -73,6 +73,10 @@ class PolicyNode : public rclcpp::Node {
     config.squat_gain_overrides_path =
         declare_parameter<std::string>("squat_gain_overrides_path", "");
     config.sit_model_path = declare_parameter<std::string>("sit_model_path", "");
+    config.sit_arm_hold_torque_limit =
+        static_cast<float>(declare_parameter<double>("sit_arm_hold_torque_limit", 2.0));
+    config.sit_arm_move_torque_limit =
+        static_cast<float>(declare_parameter<double>("sit_arm_move_torque_limit", 0.0));
     config.enable_safety_fallback = declare_parameter<bool>("enable_safety_fallback", true);
     config.min_upright_projection =
         static_cast<float>(declare_parameter<double>("min_upright_projection", 0.5));

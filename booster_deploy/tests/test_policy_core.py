@@ -265,12 +265,22 @@ class SitPolicyTest(unittest.TestCase):
         cls.default = _metadata_floats(cls.session, "default_joint_pos")
         cls.scale = _metadata_floats(cls.session, "action_scale")
         cls.stiffness = _metadata_floats(cls.session, "joint_stiffness")
+        cls.arms = np.asarray(
+            ["Shoulder" in name or "Elbow" in name for name in meta["joint_names"].split(",")]
+        )
         cls.outputs = [o.name for o in cls.session.get_outputs()]
 
     def setUp(self) -> None:
         self.policy = make_policy_controller(K1WalkControllerCfg())
         self.joint_pos = DEFAULT_POS.copy()
         self.joint_vel = np.zeros(22, dtype=np.float32)
+
+    @staticmethod
+    def uncapped_cfg() -> K1WalkControllerCfg:
+        cfg = K1WalkControllerCfg()
+        cfg.policy.sit_arm_hold_torque_limit = 0.0
+        cfg.policy.sit_arm_move_torque_limit = 0.0
+        return cfg
 
     def run_model(self, obs, enabled, state):
         return self.session.run(
@@ -296,6 +306,7 @@ class SitPolicyTest(unittest.TestCase):
         )
 
     def test_sit_targets_match_onnxruntime(self) -> None:
+        self.policy = make_policy_controller(self.uncapped_cfg())
         # Frame-zero reference from a disabled standing call.
         state = np.asarray([[0, 0, 1]], np.int64)
         seeded = self.run_model(np.zeros(120), 0.0, state)
@@ -342,6 +353,67 @@ class SitPolicyTest(unittest.TestCase):
             np.testing.assert_allclose(targets, expected, atol=1e-4)
             np.testing.assert_array_equal(stiffness, self.stiffness)
         self.assertTrue(self.policy.squat_started)
+
+    def run_capped_sit_cycle(self, hold: float, move: float) -> list[bool]:
+        """Checks every arm target against an uncapped twin; returns, per
+        checked step, whether the cap changed a target (sit-down, seated,
+        stand-up sections of 200, 100 and the rest)."""
+        cfg = K1WalkControllerCfg()
+        cfg.policy.sit_arm_hold_torque_limit = hold
+        cfg.policy.sit_arm_move_torque_limit = move
+        capped = make_policy_controller(cfg)
+        uncapped = make_policy_controller(self.uncapped_cfg())
+        # Joints held at default, as if the arms were blocked by the seat.
+        q = self.joint_pos
+        clipped: list[bool] = []
+
+        def check(squat: bool, limit: float) -> None:
+            self.policy = capped
+            targets, stiffness, _ = map(np.asarray, self.step(squat))
+            self.policy = uncapped
+            raw = np.asarray(self.step(squat)[0])
+            np.testing.assert_array_equal(targets[~self.arms], raw[~self.arms])
+            expected = raw[self.arms]
+            if limit > 0:
+                reach = limit / stiffness[self.arms]
+                expected = np.clip(expected, q[self.arms] - reach, q[self.arms] + reach)
+            np.testing.assert_allclose(targets[self.arms], expected, atol=1e-5)
+            clipped.append(bool(np.any(np.abs(raw[self.arms] - expected) > 1e-3)))
+
+        # Sitting down lasts about 5 s (250 steps), then the seated loop runs.
+        for _ in range(200):
+            check(True, move)
+        for _ in range(300):
+            self.policy = capped
+            self.step(True)
+            self.policy = uncapped
+            self.step(True)
+        for _ in range(100):
+            check(True, hold)
+
+        # Standing up uses the move limit from its first step.
+        for _ in range(2000):
+            check(False, move)
+            if capped.standing_pose_complete:
+                break
+        self.assertTrue(capped.standing_pose_complete)
+        self.assertTrue(uncapped.standing_pose_complete)
+        return clipped
+
+    def test_sit_arm_targets_are_torque_limited(self) -> None:
+        clipped = self.run_capped_sit_cycle(hold=2.0, move=6.0)
+        self.assertTrue(any(clipped[:200]))
+        self.assertTrue(any(clipped[200:300]))
+        self.assertTrue(any(clipped[300:]))
+
+    def test_sit_default_limits_only_the_seated_hold(self) -> None:
+        policy = K1WalkControllerCfg().policy
+        clipped = self.run_capped_sit_cycle(
+            policy.sit_arm_hold_torque_limit, policy.sit_arm_move_torque_limit
+        )
+        self.assertFalse(any(clipped[:200]))
+        self.assertTrue(any(clipped[200:300]))
+        self.assertFalse(any(clipped[300:]))
 
     def test_sit_cycle_returns_to_walk(self) -> None:
         walk_stiffness, _ = self.policy.walk_gains

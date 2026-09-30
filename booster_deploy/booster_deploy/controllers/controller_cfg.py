@@ -77,6 +77,11 @@ class PolicyCfg:
     squat_gain_overrides_path: Optional[str] = "tasks/squat/gain_overrides.json"
     # Walk mode only; None leaves sit unavailable. Sit uses its ONNX gains.
     sit_checkpoint_path: Optional[str] = "tasks/sit/models/sit.onnx"
+    # Sit arm torque caps (Nm) while seated / while sitting down or standing
+    # up; zero disables. Real arm motors cut out under sustained 4-10 Nm, and
+    # a 6 Nm move cap made the stand-up fall over.
+    sit_arm_hold_torque_limit: float = 2.0
+    sit_arm_move_torque_limit: float = 0.0
     enable_safety_fallback: bool = True
     # Smallest upright gravity projection tolerated before the policy stops;
     # 0.5 is roughly 60 degrees of trunk tilt.

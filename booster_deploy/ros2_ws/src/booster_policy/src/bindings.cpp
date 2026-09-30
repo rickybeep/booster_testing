@@ -69,6 +69,8 @@ PYBIND11_MODULE(booster_policy_core, m) {
       .def_readwrite("squat_model_path", &PolicyConfig::squat_model_path)
       .def_readwrite("squat_gain_overrides_path", &PolicyConfig::squat_gain_overrides_path)
       .def_readwrite("sit_model_path", &PolicyConfig::sit_model_path)
+      .def_readwrite("sit_arm_hold_torque_limit", &PolicyConfig::sit_arm_hold_torque_limit)
+      .def_readwrite("sit_arm_move_torque_limit", &PolicyConfig::sit_arm_move_torque_limit)
       .def_readwrite("enable_safety_fallback", &PolicyConfig::enable_safety_fallback)
       .def_readwrite("min_upright_projection", &PolicyConfig::min_upright_projection)
       .def_readwrite("standing_joint_pos_tolerance",

@@ -59,6 +59,13 @@ struct PolicyConfig {
   std::string squat_gain_overrides_path;
   // Walk mode only; empty leaves sit unavailable. Sit uses its ONNX gains.
   std::string sit_model_path;
+  // Sit arm torque caps in Nm: each arm target stays within limit / stiffness
+  // of the measured joint position. Hold applies while seated, move while
+  // sitting down or standing up. Zero or less disables that cap. Real K1 arm
+  // motors stop reporting after seconds near 10 Nm or minutes at 4-5 Nm.
+  // The stand-up needs full arm torque; a 6 Nm move cap made it fall over.
+  float sit_arm_hold_torque_limit = 2.0F;
+  float sit_arm_move_torque_limit = 0.0F;
   bool enable_safety_fallback = true;
   // Smallest upright gravity projection tolerated before faulting; 0.5 is
   // roughly 60 degrees of trunk tilt.
@@ -194,11 +201,14 @@ class SitPolicy {
   void ValidateRobotConfig() const;
   // Feeds the returned state back in and latches the next reference frame.
   void LatchOutputs();
+  void LimitArmTorque(const RobotState& state, bool sit);
 
   const PolicyConfig& config_;
   OnnxModel model_;
   std::size_t anchor_index_ = 0;
   std::vector<std::size_t> policy_to_robot_;
+  // Robot joint index of each shoulder and elbow joint.
+  std::vector<std::size_t> arm_indices_;
   // Policy joint index for each of the 20 action slots.
   std::vector<std::size_t> action_to_policy_;
   std::vector<std::size_t> head_indices_;
