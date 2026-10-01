@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -11,8 +12,9 @@
 
 namespace booster_policy {
 
-// Walk and squat control all 22 K1 joints, including the head; sit holds the
-// head at zero and controls the other 20.
+// Walk and squat control all 22 K1 joints, including the head; the sit policy
+// controls the other 20, and while seated the head follows the operator or
+// looks around.
 inline constexpr std::size_t kPolicyJointCount = 22;
 
 // Walk policy layout: 50 frames of angular velocity (3), projected gravity (3),
@@ -66,6 +68,16 @@ struct PolicyConfig {
   // The stand-up needs full arm torque; a 6 Nm move cap made it fall over.
   float sit_arm_hold_torque_limit = 2.0F;
   float sit_arm_move_torque_limit = 0.0F;
+  // While seated, each ankle pitch (toes up and down) drifts on its own
+  // between random poses within +/- this amplitude (rad): eased moves with
+  // random pauses. It fades in once seated; a stand request fades it out and
+  // waits about 0.3 s before standing. Zero disables it.
+  float sit_ankle_wiggle_amplitude = 0.35F;
+  // While seated, once the operator has left the head target alone for a few
+  // seconds, the head looks around at random like the track-control gaze.
+  bool sit_head_look_around = true;
+  // Seconds between Step calls; times the seated head and ankle motion.
+  float policy_dt = 0.02F;
   bool enable_safety_fallback = true;
   // Smallest upright gravity projection tolerated before faulting; 0.5 is
   // roughly 60 degrees of trunk tilt.
@@ -191,17 +203,40 @@ class SitPolicy {
 
   // Restores the standing state and the embedded frame-zero reference.
   void Reset();
-  const JointCommand& Step(const RobotState& state, bool sit);
+  // `head_target` (yaw, pitch) is followed only while seated.
+  const JointCommand& Step(const RobotState& state, bool sit,
+                           const std::array<float, 2>& head_target);
   // Standing means the trajectory state is back at its [0, 0, 1] sentinel.
   bool IsStandingPose() const;
   const JointCommand& gains() const { return command_; }
+  // Offsets (rad) last added to the left and right ankle-pitch targets.
+  const std::array<float, 2>& ankle_offsets() const { return ankle_offset_; }
 
  private:
+  // One foot's eased move from `from` to `to` (fractions of the amplitude),
+  // followed by a pause.
+  struct FootMotion {
+    float pose = 0.0F;
+    float from = 0.0F;
+    float to = 0.0F;
+    float elapsed = 0.0F;
+    float duration = 0.0F;
+    float hold = 0.0F;
+  };
+
   void ValidateModel() const;
   void ValidateRobotConfig() const;
   // Feeds the returned state back in and latches the next reference frame.
   void LatchOutputs();
-  void LimitArmTorque(const RobotState& state, bool sit);
+  // Sit requested and the trajectory in its seated loop.
+  bool Seated(bool sit) const;
+  void SteerHead(const RobotState& state, bool seated, const std::array<float, 2>& head_target);
+  // Advances the look-around and returns its head goal (yaw, pitch).
+  std::array<float, 2> LookAround();
+  void WiggleAnkles(bool seated);
+  void MoveFoot(FootMotion& foot);
+  void LimitArmTorque(const RobotState& state, bool seated);
+  float Uniform(float low, float high);
 
   const PolicyConfig& config_;
   OnnxModel model_;
@@ -209,6 +244,26 @@ class SitPolicy {
   std::vector<std::size_t> policy_to_robot_;
   // Robot joint index of each shoulder and elbow joint.
   std::vector<std::size_t> arm_indices_;
+  // Policy joint index of the left and right ankle-pitch joints.
+  std::vector<std::size_t> ankle_pitch_indices_;
+  std::mt19937 rng_;
+  // Last commanded head (yaw, pitch); starts at the measured pose.
+  std::array<float, 2> head_position_{};
+  bool head_initialized_ = false;
+  bool was_seated_ = false;
+  // Operator head target last seen and seconds since it last changed.
+  std::array<float, 2> operator_target_{};
+  float operator_idle_ = 0.0F;
+  // Current look-around gaze and how long to keep it once reached.
+  std::array<float, 2> look_target_{};
+  float look_hold_ = 0.0F;
+  // Ankle wiggle fade (0..1), settle time still owed before a stand-up may
+  // start, each foot's motion, and the offsets and rates last sent.
+  float wiggle_envelope_ = 0.0F;
+  float wiggle_settle_left_ = 0.0F;
+  std::array<FootMotion, 2> feet_{};
+  std::array<float, 2> ankle_offset_{};
+  std::array<float, 2> ankle_offset_rate_{};
   // Policy joint index for each of the 20 action slots.
   std::vector<std::size_t> action_to_policy_;
   std::vector<std::size_t> head_indices_;
@@ -247,6 +302,7 @@ class WalkPolicy {
   bool has_sit() const { return sit_ != nullptr; }
   // Only available when a sit model is configured.
   const JointCommand& sit_gains() const;
+  const std::array<float, 2>& sit_ankle_offsets() const;
 
  private:
   void ValidateModel() const;

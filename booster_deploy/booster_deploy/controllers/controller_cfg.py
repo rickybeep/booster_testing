@@ -82,6 +82,11 @@ class PolicyCfg:
     # a 6 Nm move cap made the stand-up fall over.
     sit_arm_hold_torque_limit: float = 2.0
     sit_arm_move_torque_limit: float = 0.0
+    # Seated ankle-pitch wiggle (rad): each foot drifts on its own between
+    # random poses within +/- this; 0 disables.
+    sit_ankle_wiggle_amplitude: float = 0.35
+    # Seated random look-around whenever the D-pad is left alone for 5 s.
+    sit_head_look_around: bool = True
     enable_safety_fallback: bool = True
     # Smallest upright gravity projection tolerated before the policy stops;
     # 0.5 is roughly 60 degrees of trunk tilt.

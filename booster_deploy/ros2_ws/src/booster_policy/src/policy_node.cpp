@@ -77,6 +77,9 @@ class PolicyNode : public rclcpp::Node {
         static_cast<float>(declare_parameter<double>("sit_arm_hold_torque_limit", 2.0));
     config.sit_arm_move_torque_limit =
         static_cast<float>(declare_parameter<double>("sit_arm_move_torque_limit", 0.0));
+    config.sit_ankle_wiggle_amplitude =
+        static_cast<float>(declare_parameter<double>("sit_ankle_wiggle_amplitude", 0.35));
+    config.sit_head_look_around = declare_parameter<bool>("sit_head_look_around", true);
     config.enable_safety_fallback = declare_parameter<bool>("enable_safety_fallback", true);
     config.min_upright_projection =
         static_cast<float>(declare_parameter<double>("min_upright_projection", 0.5));
@@ -104,6 +107,7 @@ class PolicyNode : public rclcpp::Node {
         std::chrono::duration<double>(policy_dt));
     low_state_decimation_ =
         std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(policy_dt / low_state_dt)));
+    config.policy_dt = static_cast<float>(policy_dt);
 
     controller_ = std::make_unique<PolicyController>(std::move(config));
     state_.joint_pos.assign(kPolicyJointCount, 0.0F);

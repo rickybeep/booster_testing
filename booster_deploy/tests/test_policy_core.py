@@ -265,9 +265,9 @@ class SitPolicyTest(unittest.TestCase):
         cls.default = _metadata_floats(cls.session, "default_joint_pos")
         cls.scale = _metadata_floats(cls.session, "action_scale")
         cls.stiffness = _metadata_floats(cls.session, "joint_stiffness")
-        cls.arms = np.asarray(
-            ["Shoulder" in name or "Elbow" in name for name in meta["joint_names"].split(",")]
-        )
+        names = meta["joint_names"].split(",")
+        cls.arms = np.asarray(["Shoulder" in name or "Elbow" in name for name in names])
+        cls.ankles = [names.index("Left_Ankle_Pitch"), names.index("Right_Ankle_Pitch")]
         cls.outputs = [o.name for o in cls.session.get_outputs()]
 
     def setUp(self) -> None:
@@ -276,10 +276,14 @@ class SitPolicyTest(unittest.TestCase):
         self.joint_vel = np.zeros(22, dtype=np.float32)
 
     @staticmethod
-    def uncapped_cfg() -> K1WalkControllerCfg:
+    def plain_cfg() -> K1WalkControllerCfg:
+        """Arm caps, ankle wiggle and look-around off: targets come straight
+        from the model and the head follows the operator."""
         cfg = K1WalkControllerCfg()
         cfg.policy.sit_arm_hold_torque_limit = 0.0
         cfg.policy.sit_arm_move_torque_limit = 0.0
+        cfg.policy.sit_ankle_wiggle_amplitude = 0.0
+        cfg.policy.sit_head_look_around = False
         return cfg
 
     def run_model(self, obs, enabled, state):
@@ -292,21 +296,23 @@ class SitPolicyTest(unittest.TestCase):
             },
         )
 
-    def step(self, squat: bool, quat=(1.0, 0.0, 0.0, 0.0), gravity=UPRIGHT):
+    def step(self, squat: bool, quat=(1.0, 0.0, 0.0, 0.0), gravity=UPRIGHT, head=(0.3, 0.1)):
         return self.policy.step(
             np.asarray([0.1, -0.2, 0.05], np.float32),
             gravity,
             self.joint_pos,
             self.joint_vel,
             (0.0, 0.0, 0.0),
-            (0.3, 0.1),
+            head,
             squat,
             core.PosePolicy.SIT,
             quat,
         )
 
     def test_sit_targets_match_onnxruntime(self) -> None:
-        self.policy = make_policy_controller(self.uncapped_cfg())
+        self.policy = make_policy_controller(self.plain_cfg())
+        head_step = 1.5 * K1WalkControllerCfg().policy_dt
+        head = None
         # Frame-zero reference from a disabled standing call.
         state = np.asarray([[0, 0, 1]], np.int64)
         seeded = self.run_model(np.zeros(120), 0.0, state)
@@ -330,14 +336,17 @@ class SitPolicyTest(unittest.TestCase):
                 _quat_inv(_quat_mul(root_yaw_inv, root)),
                 _quat_mul(ref_yaw_inv, ref_quat[self.anchor]),
             )
+            joint_pos = self.joint_pos - self.default
+            joint_vel = self.joint_vel.copy()
+            joint_pos[:2] = joint_vel[:2] = 0.0  # Head state is hidden.
             obs = np.concatenate(
                 [
                     ref_pos,
                     ref_vel,
                     _matrix(relative)[:, :2].flatten(),
                     [0.1, -0.2, 0.05],
-                    self.joint_pos - self.default,
-                    self.joint_vel,
+                    joint_pos,
+                    joint_vel,
                     last_action,
                     gravity,
                 ]
@@ -347,9 +356,14 @@ class SitPolicyTest(unittest.TestCase):
             state, ref_pos, ref_vel, ref_quat = (
                 results[1], results[2][0], results[3][0], results[5][0]
             )
+            # Sitting down, the head eases from where it was toward zero and
+            # ignores the operator's target.
+            if head is None:
+                head = self.joint_pos[:2].astype(np.float64)
+            head = head + np.clip(-head, -head_step, head_step)
             expected = self.default.copy()
             expected[2:] += self.scale * last_action
-            expected[:2] = 0.0  # Head held at zero, ignoring the head target.
+            expected[:2] = head
             np.testing.assert_allclose(targets, expected, atol=1e-4)
             np.testing.assert_array_equal(stiffness, self.stiffness)
         self.assertTrue(self.policy.squat_started)
@@ -358,11 +372,11 @@ class SitPolicyTest(unittest.TestCase):
         """Checks every arm target against an uncapped twin; returns, per
         checked step, whether the cap changed a target (sit-down, seated,
         stand-up sections of 200, 100 and the rest)."""
-        cfg = K1WalkControllerCfg()
+        cfg = self.plain_cfg()
         cfg.policy.sit_arm_hold_torque_limit = hold
         cfg.policy.sit_arm_move_torque_limit = move
         capped = make_policy_controller(cfg)
-        uncapped = make_policy_controller(self.uncapped_cfg())
+        uncapped = make_policy_controller(self.plain_cfg())
         # Joints held at default, as if the arms were blocked by the seat.
         q = self.joint_pos
         clipped: list[bool] = []
@@ -414,6 +428,127 @@ class SitPolicyTest(unittest.TestCase):
         self.assertFalse(any(clipped[:200]))
         self.assertTrue(any(clipped[200:300]))
         self.assertFalse(any(clipped[300:]))
+
+    def test_sit_head_follows_operator_only_while_seated(self) -> None:
+        self.policy = make_policy_controller(self.plain_cfg())
+        head_step = 1.5 * K1WalkControllerCfg().policy_dt
+        target = np.asarray([0.3, 0.1])
+        heads = []
+        # Sitting down lasts about 5 s (250 steps), then the seated loop runs.
+        for _ in range(500):
+            heads.append(np.asarray(self.step(True, head=tuple(target))[0])[:2])
+        for _ in range(2000):
+            heads.append(np.asarray(self.step(False, head=tuple(target))[0])[:2])
+            if self.policy.standing_pose_complete:
+                break
+        heads = np.asarray(heads)
+
+        np.testing.assert_array_equal(heads[:240], 0.0)
+        np.testing.assert_allclose(heads[400:500], np.tile(target, (100, 1)), atol=1e-6)
+        np.testing.assert_allclose(heads[520:], 0.0, atol=1e-6)
+        self.assertLessEqual(np.abs(np.diff(heads, axis=0)).max(), head_step + 1e-6)
+
+    def test_sit_hides_head_state_from_the_policy(self) -> None:
+        moved = make_policy_controller(self.plain_cfg())
+        still = make_policy_controller(self.plain_cfg())
+        head_moved_pos = DEFAULT_POS.copy()
+        head_moved_pos[:2] = (0.4, -0.2)
+        head_moved_vel = np.zeros(22, np.float32)
+        head_moved_vel[:2] = (1.0, -1.0)
+        for _ in range(20):
+            self.policy, self.joint_pos, self.joint_vel = moved, head_moved_pos, head_moved_vel
+            a = np.asarray(self.step(True)[0])
+            self.policy, self.joint_pos, self.joint_vel = still, DEFAULT_POS, np.zeros(22, np.float32)
+            b = np.asarray(self.step(True)[0])
+            np.testing.assert_array_equal(a[2:], b[2:])
+
+    def test_sit_head_looks_around_until_the_operator_steers(self) -> None:
+        cfg = self.plain_cfg()
+        cfg.policy.sit_head_look_around = True
+        self.policy = make_policy_controller(cfg)
+        dt = cfg.policy_dt
+        idle = (0.3, 0.1)
+        steered = (-0.5, 0.15)
+        heads = []
+        # Sitting down lasts about 5 s (250 steps); then 30 s seated.
+        for _ in range(1750):
+            heads.append(np.asarray(self.step(True, head=idle)[0])[:2])
+        for _ in range(1000):
+            heads.append(np.asarray(self.step(True, head=steered)[0])[:2])
+        for _ in range(2000):
+            heads.append(np.asarray(self.step(False, head=steered)[0])[:2])
+            if self.policy.standing_pose_complete:
+                break
+        heads = np.asarray(heads)
+
+        np.testing.assert_array_equal(heads[:240], 0.0)
+        looking = heads[300:1750]
+        self.assertLessEqual(np.abs(looking[:, 0]).max(), 0.85 + 1e-6)
+        self.assertLessEqual(np.abs(looking[:, 1]).max(), 0.22 + 1e-6)
+        self.assertGreater(np.ptp(looking[:, 0]), 0.5)
+        self.assertGreater(np.ptp(looking[:, 1]), 0.15)
+        self.assertLessEqual(np.abs(np.diff(looking, axis=0)).max(), 0.8 * dt + 1e-6)
+        # A D-pad change takes over at once; looking resumes after 5 s idle.
+        np.testing.assert_allclose(heads[1810:1995], np.tile(steered, (185, 1)), atol=1e-6)
+        self.assertGreater(np.abs(heads[2000:2750] - steered).max(), 0.1)
+        np.testing.assert_allclose(heads[2830:], 0.0, atol=1e-6)
+        self.assertLessEqual(np.abs(np.diff(heads, axis=0)).max(), 1.5 * dt + 1e-6)
+
+    def test_sit_ankles_wiggle_only_while_seated(self) -> None:
+        cfg = self.plain_cfg()
+        cfg.policy.sit_ankle_wiggle_amplitude = 0.2
+        dt = cfg.policy_dt
+        wiggling = make_policy_controller(cfg)
+        still = make_policy_controller(self.plain_cfg())
+        others = np.ones(22, bool)
+        others[self.ankles] = False
+        # Ankles track the wiggle perfectly, so the policy should see no change.
+        offset = np.zeros(2)
+        rate = np.zeros(2)
+        offsets, errors = [], []
+
+        # Sitting down lasts about 5 s (250 steps); then 20 s seated.
+        for _ in range(1250):
+            self.policy, self.joint_vel = wiggling, np.zeros(22, np.float32)
+            self.joint_pos = DEFAULT_POS.copy()
+            self.joint_pos[self.ankles] += offset
+            self.joint_vel[self.ankles] = rate
+            a = np.asarray(self.step(True)[0])
+            self.policy, self.joint_pos = still, DEFAULT_POS
+            self.joint_vel = np.zeros(22, np.float32)
+            b = np.asarray(self.step(True)[0])
+            new = np.asarray(wiggling.sit_ankle_offsets)
+            rate, offset = (new - offset) / dt, new
+            offsets.append(offset)
+            errors.append(np.abs(a[others] - b[others]).max())
+            np.testing.assert_allclose(a[self.ankles] - b[self.ankles], offset, atol=1e-4)
+        offsets = np.asarray(offsets)
+
+        self.assertLess(max(errors), 1e-3)
+        np.testing.assert_array_equal(offsets[:240], 0.0)
+        seated = offsets[350:]
+        self.assertLessEqual(np.abs(offsets).max(), 0.2 + 1e-6)
+        for foot in seated.T:
+            self.assertGreater(np.ptp(foot), 0.15)
+            # Eased moves with pauses in between, not a constant sweep.
+            steps = np.abs(np.diff(foot))
+            self.assertLessEqual(steps.max(), 0.025)
+            self.assertGreater(np.mean(steps < 1e-7), 0.2)
+        # The feet move independently.
+        self.assertGreater(np.abs(seated[:, 0] - seated[:, 1]).max(), 0.1)
+
+        def steps_to_stand(policy) -> int:
+            self.policy, self.joint_pos = policy, DEFAULT_POS
+            self.joint_vel = np.zeros(22, np.float32)
+            for n in range(1, 2001):
+                self.step(False)
+                if policy.standing_pose_complete:
+                    return n
+            self.fail("never stood up")
+
+        # Standing waits for the 0.2 s fade-out plus 0.1 s settle.
+        delay = (steps_to_stand(wiggling) - steps_to_stand(still)) * dt
+        self.assertAlmostEqual(delay, 0.3, delta=0.05)
 
     def test_sit_cycle_returns_to_walk(self) -> None:
         walk_stiffness, _ = self.policy.walk_gains

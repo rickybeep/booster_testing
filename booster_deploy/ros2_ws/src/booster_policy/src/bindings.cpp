@@ -71,6 +71,9 @@ PYBIND11_MODULE(booster_policy_core, m) {
       .def_readwrite("sit_model_path", &PolicyConfig::sit_model_path)
       .def_readwrite("sit_arm_hold_torque_limit", &PolicyConfig::sit_arm_hold_torque_limit)
       .def_readwrite("sit_arm_move_torque_limit", &PolicyConfig::sit_arm_move_torque_limit)
+      .def_readwrite("sit_ankle_wiggle_amplitude", &PolicyConfig::sit_ankle_wiggle_amplitude)
+      .def_readwrite("sit_head_look_around", &PolicyConfig::sit_head_look_around)
+      .def_readwrite("policy_dt", &PolicyConfig::policy_dt)
       .def_readwrite("enable_safety_fallback", &PolicyConfig::enable_safety_fallback)
       .def_readwrite("min_upright_projection", &PolicyConfig::min_upright_projection)
       .def_readwrite("standing_joint_pos_tolerance",
@@ -141,9 +144,14 @@ PYBIND11_MODULE(booster_policy_core, m) {
                                return py::make_tuple(ToNumpy(gains.stiffness),
                                                      ToNumpy(gains.damping));
                              })
-      .def_property_readonly("sit_gains", [](const PolicyController& controller) {
-        const auto& gains = controller.walk().sit_gains();
-        return py::make_tuple(ToNumpy(gains.stiffness), ToNumpy(gains.damping));
+      .def_property_readonly("sit_gains",
+                             [](const PolicyController& controller) {
+                               const auto& gains = controller.walk().sit_gains();
+                               return py::make_tuple(ToNumpy(gains.stiffness),
+                                                     ToNumpy(gains.damping));
+                             })
+      .def_property_readonly("sit_ankle_offsets", [](const PolicyController& controller) {
+        return controller.walk().sit_ankle_offsets();
       });
 
   m.def("quaternion_from_rpy", &QuaternionFromRpy, py::arg("roll"), py::arg("pitch"),

@@ -43,6 +43,38 @@ const std::array<int64_t, kSitStateSize> kSitStandingState = {0, 0, 1};
 // idle loop), 3 standing up. Both shipped sit models behave this way.
 constexpr std::size_t kSitPhaseIndex = 1;
 constexpr int64_t kSitSeatedPhase = 2;
+// Fastest head motion (rad/s) toward the operator's target or back to zero.
+constexpr float kSitHeadRate = 1.5F;
+// Seated look-around, matching the track-control idle gaze on the learned
+// walk: diagonal-biased random targets, a constant 0.8 rad/s slew, a 2-4 s
+// hold, and sometimes a longer stare instead of a new target.
+constexpr float kLookYaw = 0.85F;
+constexpr float kLookPitch = 0.22F;
+constexpr float kLookRate = 0.8F;
+constexpr float kLookMinYawMove = 0.25F;
+constexpr float kLookMinPitchMove = 0.08F;
+constexpr float kLookMinAxisRatio = 0.35F;
+constexpr float kLookHoldMin = 2.0F;
+constexpr float kLookHoldMax = 4.0F;
+constexpr float kLookStareChance = 0.35F;
+constexpr float kLookStareMin = 0.5F;
+constexpr float kLookStareMax = 2.0F;
+// The look-around takes over once the operator target is this long unchanged.
+constexpr float kOperatorIdle = 5.0F;
+// Ankle wiggle fade-in once seated and fade-out on a stand request (s). The
+// stand-up waits for the fade-out plus the settle time.
+constexpr float kSitWiggleFadeIn = 1.0F;
+constexpr float kSitWiggleFadeOut = 0.2F;
+constexpr float kSitWiggleSettle = 0.1F;
+// Each foot eases to a new pose over 0.4-1.2 s (longer for bigger moves),
+// pauses 0.2-2.5 s, and sometimes returns to rest. A new pose differs from
+// the current one by at least the minimum move (fractions of the amplitude).
+constexpr float kFootMoveMin = 0.4F;
+constexpr float kFootMoveMax = 1.2F;
+constexpr float kFootHoldMin = 0.2F;
+constexpr float kFootHoldMax = 2.5F;
+constexpr float kFootRestChance = 0.3F;
+constexpr float kFootMinMove = 0.3F;
 
 // Squat depth shows up almost entirely in these joints: measured in MuJoCo
 // they sit within 0.11 rad of the default pose while standing and 0.85 rad
@@ -569,7 +601,21 @@ SitPolicy::SitPolicy(const PolicyConfig& config)
       arm_indices_.push_back(policy_to_robot_[i]);
     }
   }
+  for (const char* name : {"Left_Ankle_Pitch", "Right_Ankle_Pitch"}) {
+    const auto it = std::find(joint_names.begin(), joint_names.end(), name);
+    if (it == joint_names.end()) {
+      throw std::invalid_argument(std::string("Sit ONNX is missing joint ") + name);
+    }
+    ankle_pitch_indices_.push_back(static_cast<std::size_t>(it - joint_names.begin()));
+  }
   ValidateRobotConfig();
+  if (head_indices_.size() != 2) {
+    throw std::invalid_argument("Sit ONNX must have two head joints");
+  }
+  if (!(config_.policy_dt > 0.0F)) {
+    throw std::invalid_argument("Sit policy_dt must be positive");
+  }
+  rng_.seed(std::random_device{}());
 
   // The policy artifact owns its deployment gains; sit has no file overrides.
   command_ = MakeJointCommand(config_.robot);
@@ -648,6 +694,13 @@ void SitPolicy::LatchOutputs() {
 void SitPolicy::Reset() {
   last_action_.assign(kSitActionCount, 0.0F);
   root_yaw_initialized_ = false;
+  head_initialized_ = false;
+  was_seated_ = false;
+  wiggle_envelope_ = 0.0F;
+  wiggle_settle_left_ = 0.0F;
+  feet_ = {};
+  ankle_offset_ = {};
+  ankle_offset_rate_ = {};
 
   // A disabled standing call returns the exact frame-zero reference embedded
   // in the model. Its action is deliberately discarded.
@@ -659,7 +712,8 @@ void SitPolicy::Reset() {
   init_reference_yaw_inv_ = QuatInv(YawQuat(ref_anchor_quat_));
 }
 
-const JointCommand& SitPolicy::Step(const RobotState& state, bool sit) {
+const JointCommand& SitPolicy::Step(const RobotState& state, bool sit,
+                                    const std::array<float, 2>& head_target) {
   if (!root_yaw_initialized_) {
     init_root_yaw_inv_ = QuatInv(YawQuat(state.root_quat));
     root_yaw_initialized_ = true;
@@ -683,10 +737,22 @@ const JointCommand& SitPolicy::Step(const RobotState& state, bool sit) {
     obs[53 + i] = state.joint_pos[policy_to_robot_[i]] - default_joint_pos_[i];
     obs[75 + i] = state.joint_vel[policy_to_robot_[i]];
   }
+  // The head was fixed at zero in training and the ankle wiggle is not the
+  // policy's doing, so the policy sees neither.
+  for (const std::size_t i : head_indices_) {
+    obs[53 + i] = 0.0F;
+    obs[75 + i] = 0.0F;
+  }
+  for (std::size_t k = 0; k < ankle_pitch_indices_.size(); ++k) {
+    obs[53 + ankle_pitch_indices_[k]] -= ankle_offset_[k];
+    obs[75 + ankle_pitch_indices_[k]] -= ankle_offset_rate_[k];
+  }
   std::copy(last_action_.begin(), last_action_.end(), obs + 97);
   std::copy(state.projected_gravity.begin(), state.projected_gravity.end(), obs + 117);
-  // The ONNX input keeps its training name; it enables sitting.
-  model_.input(1)[0] = sit ? 1.0F : 0.0F;
+  // The ONNX input keeps its training name; it enables sitting. A stand
+  // request keeps the seat until the ankle wiggle has faded and settled.
+  const bool settling = wiggle_envelope_ > 0.0F || wiggle_settle_left_ > 0.0F;
+  model_.input(1)[0] = sit || settling ? 1.0F : 0.0F;
 
   model_.Run();
   const std::vector<float>& action = model_.output(0);
@@ -698,17 +764,158 @@ const JointCommand& SitPolicy::Step(const RobotState& state, bool sit) {
     const std::size_t i = action_to_policy_[a];
     command_.position[policy_to_robot_[i]] = default_joint_pos_[i] + action_scale_[a] * action[a];
   }
-  for (const std::size_t i : head_indices_) {
-    command_.position[policy_to_robot_[i]] = 0.0F;
-  }
-  LimitArmTorque(state, sit);
+  const bool seated = Seated(sit);
+  SteerHead(state, seated, head_target);
+  WiggleAnkles(seated);
+  LimitArmTorque(state, Seated(sit || settling));
   return command_;
 }
 
-void SitPolicy::LimitArmTorque(const RobotState& state, bool sit) {
+bool SitPolicy::Seated(bool sit) const {
   // The model may report the seated phase for a few steps after a stand
-  // request, so standing up always gets the move limit.
-  const bool seated = sit && model_.int64_input(2)[kSitPhaseIndex] == kSitSeatedPhase;
+  // request, so standing up never counts as seated.
+  return sit && model_.int64_input(2)[kSitPhaseIndex] == kSitSeatedPhase;
+}
+
+void SitPolicy::SteerHead(const RobotState& state, bool seated,
+                          const std::array<float, 2>& head_target) {
+  if (!head_initialized_) {
+    for (std::size_t k = 0; k < head_position_.size(); ++k) {
+      head_position_[k] = state.joint_pos[policy_to_robot_[head_indices_[k]]];
+    }
+    head_initialized_ = true;
+  }
+  const float dt = config_.policy_dt;
+  if (seated && !was_seated_) {
+    operator_target_ = head_target;
+    operator_idle_ = kOperatorIdle;
+    look_target_ = head_position_;
+    look_hold_ = Uniform(kLookHoldMin, kLookHoldMax);
+  }
+  was_seated_ = seated;
+
+  std::array<float, 2> goal{};
+  float rate = kSitHeadRate;
+  if (seated) {
+    if (head_target != operator_target_) {
+      operator_target_ = head_target;
+      operator_idle_ = 0.0F;
+    } else {
+      operator_idle_ += dt;
+    }
+    if (config_.sit_head_look_around && operator_idle_ >= kOperatorIdle) {
+      goal = LookAround();
+      rate = kLookRate;
+    } else {
+      goal = head_target;
+      look_target_ = head_target;
+      look_hold_ = 0.0F;
+    }
+  }
+  const float max_step = rate * dt;
+  for (std::size_t k = 0; k < head_position_.size(); ++k) {
+    head_position_[k] += std::clamp(goal[k] - head_position_[k], -max_step, max_step);
+    command_.position[policy_to_robot_[head_indices_[k]]] = head_position_[k];
+  }
+}
+
+std::array<float, 2> SitPolicy::LookAround() {
+  const bool arrived = std::abs(head_position_[0] - look_target_[0]) < 1e-3F &&
+                       std::abs(head_position_[1] - look_target_[1]) < 1e-3F;
+  if (!arrived) {
+    return look_target_;
+  }
+  look_hold_ -= config_.policy_dt;
+  if (look_hold_ > 0.0F) {
+    return look_target_;
+  }
+  if (Uniform(0.0F, 1.0F) < kLookStareChance) {
+    look_hold_ = Uniform(kLookStareMin, kLookStareMax);
+    return look_target_;
+  }
+  // Both axes must move visibly, and mostly single-axis moves are rejected so
+  // the gaze sweeps diagonally.
+  const auto [yaw0, pitch0] = look_target_;
+  look_target_ = {yaw0 < 0.0F ? kLookYaw : -kLookYaw, pitch0 < 0.0F ? kLookPitch : -kLookPitch};
+  for (int attempt = 0; attempt < 40; ++attempt) {
+    const float yaw = Uniform(-kLookYaw, kLookYaw);
+    const float pitch = Uniform(-kLookPitch, kLookPitch);
+    const float dy = std::abs(yaw - yaw0);
+    const float dp = std::abs(pitch - pitch0);
+    if (dy < kLookMinYawMove || dp < kLookMinPitchMove) {
+      continue;
+    }
+    const float ny = dy / (2.0F * kLookYaw);
+    const float np = dp / (2.0F * kLookPitch);
+    if (std::min(ny, np) / std::max(ny, np) >= kLookMinAxisRatio) {
+      look_target_ = {yaw, pitch};
+      break;
+    }
+  }
+  look_hold_ = Uniform(kLookHoldMin, kLookHoldMax);
+  return look_target_;
+}
+
+void SitPolicy::WiggleAnkles(bool seated) {
+  const float dt = config_.policy_dt;
+  const float amplitude = std::max(config_.sit_ankle_wiggle_amplitude, 0.0F);
+  const bool starting = wiggle_envelope_ == 0.0F;
+  const float fade = seated && amplitude > 0.0F ? dt / kSitWiggleFadeIn : -dt / kSitWiggleFadeOut;
+  wiggle_envelope_ = std::clamp(wiggle_envelope_ + fade, 0.0F, 1.0F);
+  wiggle_settle_left_ = wiggle_envelope_ > 0.0F ? kSitWiggleSettle
+                                                : std::max(wiggle_settle_left_ - dt, 0.0F);
+  for (std::size_t k = 0; k < feet_.size(); ++k) {
+    FootMotion& foot = feet_[k];
+    if (wiggle_envelope_ == 0.0F) {
+      foot = {};
+    } else {
+      if (starting) {
+        // Staggered first moves so the feet never start together.
+        foot.hold = Uniform(0.0F, kFootHoldMax);
+      }
+      MoveFoot(foot);
+    }
+    const float offset = amplitude * wiggle_envelope_ * foot.pose;
+    ankle_offset_rate_[k] = (offset - ankle_offset_[k]) / dt;
+    ankle_offset_[k] = offset;
+    // Unclamped: the model's own target may lie outside the joint range, and
+    // the offset adds at most amplitude * kp of torque.
+    command_.position[policy_to_robot_[ankle_pitch_indices_[k]]] += offset;
+  }
+}
+
+void SitPolicy::MoveFoot(FootMotion& foot) {
+  const float dt = config_.policy_dt;
+  if (foot.elapsed < foot.duration) {
+    foot.elapsed = std::min(foot.elapsed + dt, foot.duration);
+    // Smootherstep: zero velocity and acceleration at both ends.
+    const float t = foot.elapsed / foot.duration;
+    const float s = t * t * t * (t * (t * 6.0F - 15.0F) + 10.0F);
+    foot.pose = foot.from + (foot.to - foot.from) * s;
+    return;
+  }
+  foot.hold -= dt;
+  if (foot.hold > 0.0F) {
+    return;
+  }
+  foot.from = foot.pose;
+  foot.to = 0.0F;
+  if (std::abs(foot.pose) < kFootMinMove || Uniform(0.0F, 1.0F) >= kFootRestChance) {
+    do {
+      foot.to = Uniform(-1.0F, 1.0F);
+    } while (std::abs(foot.to - foot.from) < kFootMinMove);
+  }
+  const float distance = std::abs(foot.to - foot.from) / 2.0F;
+  foot.duration = (kFootMoveMin + distance * (kFootMoveMax - kFootMoveMin)) * Uniform(0.8F, 1.2F);
+  foot.elapsed = 0.0F;
+  foot.hold = Uniform(kFootHoldMin, kFootHoldMax);
+}
+
+float SitPolicy::Uniform(float low, float high) {
+  return std::uniform_real_distribution<float>(low, high)(rng_);
+}
+
+void SitPolicy::LimitArmTorque(const RobotState& state, bool seated) {
   const float limit =
       seated ? config_.sit_arm_hold_torque_limit : config_.sit_arm_move_torque_limit;
   if (!(limit > 0.0F)) {
@@ -942,7 +1149,7 @@ const JointCommand& WalkPolicy::Step(const RobotState& state, const PolicyComman
 
   const JointCommand* targets = nullptr;
   if (active_policy_ == ActivePolicy::kSit) {
-    targets = &sit_->Step(state, command.squat);
+    targets = &sit_->Step(state, command.squat, command.head_target);
     upright_violation_ = false;
   } else {
     targets = &squat_.Step(state, command.squat);
@@ -976,6 +1183,13 @@ const JointCommand& WalkPolicy::sit_gains() const {
     throw std::logic_error("No sit model is configured");
   }
   return sit_->gains();
+}
+
+const std::array<float, 2>& WalkPolicy::sit_ankle_offsets() const {
+  if (!sit_) {
+    throw std::logic_error("No sit model is configured");
+  }
+  return sit_->ankle_offsets();
 }
 
 PolicyController::PolicyController(PolicyConfig config) : config_(std::move(config)) {
