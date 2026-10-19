@@ -82,6 +82,9 @@ class PolicyCfg:
     # 0.5 is roughly 60 degrees of trunk tilt.
     min_upright_projection: float = 0.5
     standing_joint_pos_tolerance: float = 0.3
+    # Sit stand-up frame (ends at 500) from which control returns to walk;
+    # lower switches sooner, above 500 waits for the full stand-up.
+    sit_exit_frame: int = 480
     # The node zeroes the velocity when no command arrives for this long.
     command_timeout: float = 0.5
     onnx_threads: int = 1

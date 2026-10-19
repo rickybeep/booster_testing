@@ -64,6 +64,9 @@ struct PolicyConfig {
   // roughly 60 degrees of trunk tilt.
   float min_upright_projection = 0.5F;
   float standing_joint_pos_tolerance = 0.3F;
+  // Stand-up frame from which sit hands back to walk; the stand-up phase ends
+  // at frame 500, so values above 500 wait for the [0, 0, 1] sentinel.
+  int sit_exit_frame = 480;
   // ONNX Runtime intra-op threads; 0 lets ONNX Runtime decide.
   int onnx_threads = 1;
   RobotConfig robot;
@@ -185,7 +188,8 @@ class SitPolicy {
   // Restores the standing state and the embedded frame-zero reference.
   void Reset();
   const JointCommand& Step(const RobotState& state, bool sit);
-  // Standing means the trajectory state is back at its [0, 0, 1] sentinel.
+  // Standing means the trajectory state is back at its [0, 0, 1] sentinel or
+  // the stand-up phase has reached `sit_exit_frame`.
   bool IsStandingPose() const;
   const JointCommand& gains() const { return command_; }
 

@@ -78,6 +78,7 @@ class PolicyNode : public rclcpp::Node {
         static_cast<float>(declare_parameter<double>("min_upright_projection", 0.5));
     config.standing_joint_pos_tolerance =
         static_cast<float>(declare_parameter<double>("standing_joint_pos_tolerance", 0.3));
+    config.sit_exit_frame = static_cast<int>(declare_parameter<int64_t>("sit_exit_frame", 480));
     config.onnx_threads = static_cast<int>(declare_parameter<int64_t>("onnx_threads", 1));
     config.robot.joint_names =
         declare_parameter<std::vector<std::string>>("joint_names", std::vector<std::string>{});

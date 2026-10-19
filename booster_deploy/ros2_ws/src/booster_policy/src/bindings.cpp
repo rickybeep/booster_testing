@@ -73,6 +73,7 @@ PYBIND11_MODULE(booster_policy_core, m) {
       .def_readwrite("min_upright_projection", &PolicyConfig::min_upright_projection)
       .def_readwrite("standing_joint_pos_tolerance",
                      &PolicyConfig::standing_joint_pos_tolerance)
+      .def_readwrite("sit_exit_frame", &PolicyConfig::sit_exit_frame)
       .def_readwrite("onnx_threads", &PolicyConfig::onnx_threads)
       .def_readwrite("robot", &PolicyConfig::robot);
 

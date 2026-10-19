@@ -47,6 +47,7 @@ def policy_parameters(
         "enable_safety_fallback": bool(policy.enable_safety_fallback),
         "min_upright_projection": float(policy.min_upright_projection),
         "standing_joint_pos_tolerance": float(policy.standing_joint_pos_tolerance),
+        "sit_exit_frame": int(policy.sit_exit_frame),
         "onnx_threads": int(policy.onnx_threads),
         "joint_names": list(robot.joint_names),
         # Floats keep the ROS parameter types as double arrays.
@@ -76,6 +77,7 @@ def make_policy_controller(cfg: ControllerCfg):
         "enable_safety_fallback",
         "min_upright_projection",
         "standing_joint_pos_tolerance",
+        "sit_exit_frame",
         "onnx_threads",
     ):
         setattr(config, name, parameters[name])

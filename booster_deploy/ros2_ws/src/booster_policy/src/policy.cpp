@@ -38,7 +38,9 @@ const std::vector<std::string> kSitOutputs = {
     "actions",     "squat_state_out", "joint_pos",      "joint_vel",
     "body_pos_w",  "body_quat_w",     "body_lin_vel_w", "body_ang_vel_w",
 };
+// The trajectory state is [frame, phase, 1]; phase 3 is the stand-up.
 const std::array<int64_t, kSitStateSize> kSitStandingState = {0, 0, 1};
+constexpr int64_t kSitStandUpPhase = 3;
 
 // Squat depth shows up almost entirely in these joints: measured in MuJoCo
 // they sit within 0.11 rad of the default pose while standing and 0.85 rad
@@ -698,6 +700,9 @@ const JointCommand& SitPolicy::Step(const RobotState& state, bool sit) {
 
 bool SitPolicy::IsStandingPose() const {
   const auto& current = model_.int64_input(2);
+  if (current[1] == kSitStandUpPhase && current[0] >= config_.sit_exit_frame) {
+    return true;
+  }
   return std::equal(current.begin(), current.end(), kSitStandingState.begin());
 }
 

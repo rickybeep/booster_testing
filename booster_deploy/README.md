@@ -175,13 +175,16 @@ velocity independently to `1.5 m/s`, and angular velocity to `2.4 rad/s`.
 `obs` (`[1, 120]`), `squat_enabled` (`[1, 1]`), and the int64 trajectory state
 `squat_state_in` (`[1, 3]`); every call returns actions for the 20 non-head
 joints, `squat_state_out`, and the next reference frame. Deployment feeds the
-returned state and reference into the next control step without interpreting
-the state machine, holds both head joints at zero, and restores the standing
+returned state and reference into the next control step, reading the state
+only to detect the end of the stand-up, holds both head joints at zero, and restores the standing
 state `[0, 0, 1]` plus the embedded frame-zero reference each time the sit
 policy is selected. The anchor-orientation observation needs the full root
 orientation, which the node builds from the IMU roll, pitch, and yaw; headings
-are measured relative to the moment sit was selected. Standing means the
-trajectory state has returned to `[0, 0, 1]`. The sit policy has no
+are measured relative to the moment sit was selected. The trajectory state is
+`[frame, phase, 1]`, with phase 3 the stand-up ending at frame 500. Standing
+means the stand-up has reached `sit_exit_frame` (default `480`) or the state
+has returned to `[0, 0, 1]`; lower `sit_exit_frame` hands back to walk sooner,
+and values above `500` wait for the full stand-up. The sit policy has no
 orientation safety fallback and uses only the gains embedded in its ONNX
 metadata. Set `sit_checkpoint_path` to `None` to leave it unloaded; commanding
 sit then faults the session.
