@@ -160,6 +160,12 @@ class WalkPolicyTest(unittest.TestCase):
         self.assertAlmostEqual(float(targets[0]), 0.4, places=6)
         self.assertAlmostEqual(float(targets[1]), -0.2, places=6)
 
+    def test_walk_head_pitch_stays_level_or_up(self) -> None:
+        for request, expected in [(0.6, 0.0), (-0.8, -0.30)]:
+            self.head = (0.4, request)
+            targets, _, _ = self.step()
+            self.assertAlmostEqual(float(targets[1]), expected, places=6)
+
     def test_tilt_triggers_upright_fault(self) -> None:
         self.assertFalse(self.policy.upright_fault)
         gravity = core.projected_gravity_from_rpy(1.2, 0.0, 0.0)
@@ -234,9 +240,16 @@ def _quat_inv(q: np.ndarray) -> np.ndarray:
     return np.asarray([q[0], -q[1], -q[2], -q[3]]) / np.dot(q, q)
 
 
+def _yaw(q) -> float:
+    return math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2))
+
+
+def _yaw_quat(yaw: float) -> np.ndarray:
+    return np.asarray([math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)])
+
+
 def _yaw_inv(q: np.ndarray) -> np.ndarray:
-    yaw = math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2))
-    return _quat_inv(np.asarray([math.cos(yaw / 2), 0, 0, math.sin(yaw / 2)]))
+    return _quat_inv(_yaw_quat(_yaw(q)))
 
 
 def _matrix(q: np.ndarray) -> np.ndarray:
@@ -296,9 +309,10 @@ class SitPolicyTest(unittest.TestCase):
             },
         )
 
-    def step(self, squat: bool, quat=(1.0, 0.0, 0.0, 0.0), gravity=UPRIGHT, head=(0.3, 0.1)):
+    def step(self, squat: bool, quat=(1.0, 0.0, 0.0, 0.0), gravity=UPRIGHT, head=(0.3, 0.1),
+             gyro=(0.1, -0.2, 0.05)):
         return self.policy.step(
-            np.asarray([0.1, -0.2, 0.05], np.float32),
+            np.asarray(gyro, np.float32),
             gravity,
             self.joint_pos,
             self.joint_vel,
@@ -368,6 +382,16 @@ class SitPolicyTest(unittest.TestCase):
             np.testing.assert_array_equal(stiffness, self.stiffness)
         self.assertTrue(self.policy.squat_started)
 
+    def measured_stand_fixture(self):
+        # Old tests held the WALK crouch (knees .8 rad) through the entire
+        # SIT stand and expected completion from the sentinel alone. Supply
+        # the model's actual terminal leg pose for measured completion tests.
+        state = np.asarray([[0, 0, 1]], np.int64)
+        terminal = self.run_model(np.zeros(120), 0., state)[2][0]
+        self.joint_pos = self.joint_pos.copy()
+        self.joint_pos[10:] = terminal[10:]
+        self.joint_vel = np.zeros(22, np.float32)
+
     def run_capped_sit_cycle(self, hold: float, move: float) -> list[bool]:
         """Checks every arm target against an uncapped twin; returns, per
         checked step, whether the cap changed a target (sit-down, seated,
@@ -406,6 +430,7 @@ class SitPolicyTest(unittest.TestCase):
             check(True, hold)
 
         # Standing up uses the move limit from its first step.
+        self.measured_stand_fixture()
         for _ in range(2000):
             check(False, move)
             if capped.standing_pose_complete:
@@ -432,7 +457,7 @@ class SitPolicyTest(unittest.TestCase):
     def test_sit_head_follows_operator_only_while_seated(self) -> None:
         self.policy = make_policy_controller(self.plain_cfg())
         head_step = 1.5 * K1WalkControllerCfg().policy_dt
-        target = np.asarray([0.3, 0.1])
+        target = np.asarray([0.3, -0.1])
         heads = []
         # Sitting down lasts about 5 s (250 steps), then the seated loop runs.
         for _ in range(500):
@@ -462,13 +487,20 @@ class SitPolicyTest(unittest.TestCase):
             b = np.asarray(self.step(True)[0])
             np.testing.assert_array_equal(a[2:], b[2:])
 
+    def test_seated_operator_pitch_cannot_look_down(self) -> None:
+        self.policy = make_policy_controller(self.plain_cfg())
+        for _ in range(500):
+            head = np.asarray(self.step(True, head=(0.3, 0.5))[0])[:2]
+            self.assertLessEqual(head[1], 1e-6)
+        np.testing.assert_allclose(head, (0.3, 0.0), atol=1e-6)
+
     def test_sit_head_looks_around_until_the_operator_steers(self) -> None:
         cfg = self.plain_cfg()
         cfg.policy.sit_head_look_around = True
         self.policy = make_policy_controller(cfg)
         dt = cfg.policy_dt
-        idle = (0.3, 0.1)
-        steered = (-0.5, 0.15)
+        idle = (0.3, 0.1)  # old downward command must not pin the idle gaze
+        steered = (-0.5, -0.15)
         heads = []
         # Sitting down lasts about 5 s (250 steps); then 30 s seated.
         for _ in range(1750):
@@ -484,9 +516,13 @@ class SitPolicyTest(unittest.TestCase):
         np.testing.assert_array_equal(heads[:240], 0.0)
         looking = heads[300:1750]
         self.assertLessEqual(np.abs(looking[:, 0]).max(), 0.85 + 1e-6)
-        self.assertLessEqual(np.abs(looking[:, 1]).max(), 0.22 + 1e-6)
-        self.assertGreater(np.ptp(looking[:, 0]), 0.5)
-        self.assertGreater(np.ptp(looking[:, 1]), 0.15)
+        self.assertGreaterEqual(looking[:, 1].min(), -0.22 - 1e-6)
+        self.assertLessEqual(looking[:, 1].max(), 1e-6)
+        # Random gentle looks need not span most of the full range in 30 s.
+        # Require the designed minimum move on both axes, not a lucky draw
+        # near opposite extremes. Bounds and slew are checked independently.
+        self.assertGreaterEqual(np.ptp(looking[:, 0]), 0.25 - 1e-6)
+        self.assertGreaterEqual(np.ptp(looking[:, 1]), 0.08 - 1e-6)
         self.assertLessEqual(np.abs(np.diff(looking, axis=0)).max(), 0.8 * dt + 1e-6)
         # A D-pad change takes over at once; looking resumes after 5 s idle.
         np.testing.assert_allclose(heads[1810:1995], np.tile(steered, (185, 1)), atol=1e-6)
@@ -540,6 +576,7 @@ class SitPolicyTest(unittest.TestCase):
         def steps_to_stand(policy) -> int:
             self.policy, self.joint_pos = policy, DEFAULT_POS
             self.joint_vel = np.zeros(22, np.float32)
+            self.measured_stand_fixture()
             for n in range(1, 2001):
                 self.step(False)
                 if policy.standing_pose_complete:
@@ -557,7 +594,8 @@ class SitPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy.active_policy, core.ActivePolicy.SIT)
         self.assertTrue(self.policy.squat_started)
 
-        # Standing runs the sit trajectory back to its sentinel before walking.
+        # A non-fallen terminal pose hands off to WALK on the next tick.
+        self.measured_stand_fixture()
         for _ in range(2000):
             self.step(False)
             if self.policy.standing_pose_complete:
@@ -566,6 +604,85 @@ class SitPolicyTest(unittest.TestCase):
         _, stiffness, _ = self.step(False)
         self.assertEqual(self.policy.active_policy, core.ActivePolicy.WALK)
         np.testing.assert_array_equal(stiffness, walk_stiffness)
+
+    def test_failed_push_up_cannot_report_standing_or_publish_walk_targets(self):
+        for _ in range(300):
+            self.step(True)
+        for _ in range(350):
+            self.step(False, quat=core.quaternion_from_rpy(1.4, 1.16, 0),
+                      gravity=core.projected_gravity_from_rpy(1.4, 1.16, 0))
+        self.assertFalse(self.policy.standing_pose_complete)
+        self.assertEqual(self.policy.active_policy, core.ActivePolicy.SIT)
+        self.assertTrue(self.policy.upright_fault)
+        self.assertIn("measured upright", self.policy.fault_reason)
+        self.assertEqual(len(self.policy.sit_trace["observation"]), 120)
+        self.assertEqual(len(self.policy.sit_trace["raw_targets"]), 22)
+
+    def test_upright_terminal_pose_does_not_wait_for_leg_reference_match(self):
+        for _ in range(300):
+            self.step(True)
+        for _ in range(400):
+            self.step(False)
+        self.assertTrue(self.policy.standing_pose_complete)
+        self.assertEqual(self.policy.active_policy, core.ActivePolicy.WALK)
+        self.assertFalse(self.policy.upright_fault)
+
+    def turned_stand(self, start: float, guard_gyro=(0.1, -0.2, 0.05)):
+        """Sits facing `start`, then stands while the root heading follows the
+        reference trunk turn (about -120 degrees) as real robots do. Returns
+        frame zero's anchor quat and one (state_in, root, trace) per SIT stand
+        step, ending at the terminal sentinel before WALK resumes."""
+        self.policy = make_policy_controller(self.plain_cfg())
+        frame0 = self.run_model(np.zeros(120), 0.0, np.asarray([[0, 0, 1]], np.int64))[5][0][self.anchor]
+        root = _yaw_quat(start)
+        for _ in range(300):
+            self.step(True, root)
+        self.measured_stand_fixture()
+        records, wrap = [], None
+        for n in range(1000):
+            self.step(False, root, gyro=(0.1, -0.2, 0.05) if wrap is None else guard_gyro)
+            if self.policy.active_policy != core.ActivePolicy.SIT:
+                break
+            trace = self.policy.sit_trace
+            records.append((list(trace["state_in"]), root, trace))
+            if wrap is None and list(trace["state_out"]) == [0, 0, 1]:
+                wrap = n
+                break
+            if wrap is None:
+                root = _yaw_quat(start + _yaw(trace["reference_quat"]) - _yaw(frame0))
+            elif n - wrap >= 60:
+                break
+        self.assertIsNotNone(wrap)
+        return frame0, records
+
+    def test_turned_robot_hands_off_before_running_frame_zero_again(self) -> None:
+        # The completed turn must not be followed by a SIT frame-zero target
+        # in the old heading. Resume WALK immediately at the measured heading.
+        for start in (0.0, -2.5):  # -2.5 rad turns through +/-180 degrees
+            frame0, records = self.turned_stand(start)
+            wrap = next(i for i, r in enumerate(records) if list(r[2]["state_out"]) == [0, 0, 1])
+            turned = records[wrap][1]
+            self.assertLess((_yaw(turned) - start + math.pi) % (2 * math.pi) - math.pi, -1.7)
+            # Before the wrap the observation keeps the sit-start heading latch.
+            start_inv, ref_inv = _yaw_inv(_yaw_quat(start)), _yaw_inv(frame0)
+            for _, root, trace in records:
+                relative = _quat_mul(_quat_inv(_quat_mul(start_inv, root)),
+                                     _quat_mul(ref_inv, np.asarray(trace["reference_quat"])))
+                np.testing.assert_allclose(trace["observation"][44:50],
+                                           _matrix(relative)[:, :2].flatten(), atol=1e-4)
+            self.assertTrue(all(r[0] != [0, 0, 1] for r in records))
+            self.assertTrue(self.policy.standing_pose_complete)
+            self.step(False, turned)
+            self.assertEqual(self.policy.active_policy, core.ActivePolicy.WALK)
+
+    def test_turned_robot_enters_walk_while_still_moving_after_the_wrap(self) -> None:
+        _, records = self.turned_stand(0.3, guard_gyro=(0.0, 0.0, 1.0))
+        self.assertLess(records[-1][2]["orientation_error_rad"], math.radians(10))
+        for _ in range(60):
+            self.step(False, records[-1][1], gyro=(0.0, 0.0, 1.0))
+        self.assertTrue(self.policy.standing_pose_complete)
+        self.assertEqual(self.policy.active_policy, core.ActivePolicy.WALK)
+        self.assertFalse(self.policy.upright_fault)
 
     def test_sit_without_model_is_rejected(self) -> None:
         cfg = K1WalkControllerCfg()

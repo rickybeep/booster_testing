@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 
 #include "booster_policy/msg/policy_command.hpp"
 #include "booster_policy/msg/policy_status.hpp"
+#include "booster_policy/msg/policy_trace.hpp"
 #include "booster_policy/policy.hpp"
 #include "booster_policy/srv/start_policy.hpp"
 
@@ -117,9 +119,11 @@ class PolicyNode : public rclcpp::Node {
     low_cmd_publisher_ = create_publisher<LowCmd>(
         "joint_ctrl", rclcpp::QoS(rclcpp::KeepLast(1)).reliable());
     status_publisher_ = create_publisher<StatusMsg>("~/status", rclcpp::QoS(10));
+    trace_publisher_ = create_publisher<msg::PolicyTrace>(
+        "~/trace", rclcpp::QoS(rclcpp::KeepLast(4)).best_effort());
     low_state_subscription_ = create_subscription<LowState>(
         "/low_state", rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
-        [this](LowState::ConstSharedPtr msg) { OnLowState(*msg); });
+        [this](LowState::ConstSharedPtr msg) { OnLowState(msg); });
     command_subscription_ = create_subscription<CommandMsg>(
         "~/command", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
         [this](CommandMsg::ConstSharedPtr msg) { OnCommand(*msg); });
@@ -175,7 +179,8 @@ class PolicyNode : public rclcpp::Node {
     }
   }
 
-  void OnLowState(const LowState& msg) {
+  void OnLowState(LowState::ConstSharedPtr message) {
+    const auto& msg = *message;
     if (msg.motor_state_serial.size() < kPolicyJointCount) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
                            "Ignoring /low_state with %zu serial motors; expected %zu",
@@ -191,6 +196,9 @@ class PolicyNode : public rclcpp::Node {
           QuaternionFromRpy(msg.imu_state.rpy[0], msg.imu_state.rpy[1], msg.imu_state.rpy[2]);
       state_.projected_gravity =
           ProjectedGravityFromRpy(msg.imu_state.rpy[0], msg.imu_state.rpy[1], msg.imu_state.rpy[2]);
+      trace_low_state_ = message;
+      trace_low_state_time_ = Clock::now();
+      ++trace_low_state_sequence_;
       float max_speed = 0.0F;
       for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
         state_.joint_pos[i] = msg.motor_state_serial[i].q;
@@ -228,6 +236,13 @@ class PolicyNode : public rclcpp::Node {
 
   void OnStart(srv::StartPolicy::Response* response) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::error_code latch_error;
+    if (posture_fault_ || std::filesystem::exists("/var/lib/k1-fall-guard/latch.json", latch_error) || latch_error) {
+      response->success = false;
+      response->message = "Confirmed-fall latch requires operator inspection and acknowledgement in DAMP";
+      response->session = session_;
+      return;
+    }
     if (!has_low_state_) {
       response->success = false;
       response->message = "No /low_state received yet";
@@ -241,6 +256,7 @@ class PolicyNode : public rclcpp::Node {
     run_state_ = StatusMsg::STATE_RUNNING;
     ready_ = false;
     fault_.clear();
+    posture_fault_ = false;
     step_ = 0;
     // Start from a neutral command until the client publishes its own.
     command_ = PolicyCommand{};
@@ -291,8 +307,12 @@ class PolicyNode : public rclcpp::Node {
     auto next_tick = Clock::now() + policy_period_;
     RobotState state;
     PolicyCommand command;
+    uint64_t previous_measured_sequence = 0;
     while (WaitForTick(&next_tick)) {
       bool reset = false;
+      LowState::ConstSharedPtr measured;
+      uint64_t measured_sequence = 0;
+      double measured_age_s = 0.0;
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (run_state_ != StatusMsg::STATE_RUNNING) {
@@ -301,6 +321,9 @@ class PolicyNode : public rclcpp::Node {
         reset = reset_pending_;
         reset_pending_ = false;
         state = state_;
+        measured = trace_low_state_;
+        measured_sequence = trace_low_state_sequence_;
+        measured_age_s = std::chrono::duration<double>(Clock::now() - trace_low_state_time_).count();
         command = command_;
         const bool timed_out = !last_command_time_.has_value() ||
                                Clock::now() - *last_command_time_ > command_timeout_;
@@ -314,6 +337,8 @@ class PolicyNode : public rclcpp::Node {
         }
       }
 
+      state.fresh_measurement = measured_sequence != previous_measured_sequence && measured_age_s <= 0.1;
+      previous_measured_sequence = measured_sequence;
       if (reset) {
         controller_->Reset();
       }
@@ -322,6 +347,10 @@ class PolicyNode : public rclcpp::Node {
       try {
         const JointCommand& targets = controller_->Step(state, command);
         for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
+          if (!std::isfinite(targets.position[i]) || !std::isfinite(targets.stiffness[i]) ||
+              !std::isfinite(targets.damping[i])) {
+            throw std::runtime_error("Nonfinite policy output");
+          }
           low_cmd_.motor_cmd[i].q = targets.position[i];
           low_cmd_.motor_cmd[i].kp = targets.stiffness[i];
           low_cmd_.motor_cmd[i].kd = targets.damping[i];
@@ -332,6 +361,16 @@ class PolicyNode : public rclcpp::Node {
       const float inference_ms =
           std::chrono::duration<float, std::milli>(Clock::now() - inference_start).count();
 
+      // Copy scalars under the lock; diagnostics serialization/publishing is
+      // outside it and never participates in readiness or session decisions.
+      uint32_t trace_session = 0;
+      uint64_t trace_step = 0;
+      uint8_t trace_policy = 0;
+      bool trace_complete = false;
+      bool trace_timeout = false;
+      std::string trace_fault;
+      bool command_published = false;
+
       {
         std::lock_guard<std::mutex> lock(mutex_);
         if (reset_pending_ || run_state_ != StatusMsg::STATE_RUNNING) {
@@ -341,11 +380,10 @@ class PolicyNode : public rclcpp::Node {
         if (error) {
           run_state_ = StatusMsg::STATE_FAULT;
           fault_ = "Policy step failed: " + *error;
+          standing_pose_complete_ = false;
           ready_ = false;
           RCLCPP_ERROR(get_logger(), "%s", fault_.c_str());
         } else {
-          low_cmd_publisher_->publish(low_cmd_);
-          ready_ = low_cmd_publisher_->get_subscription_count() > 0;
           inference_ms_ = inference_ms;
           ++step_;
           active_policy_ = ToStatusPolicy(controller_->active_policy());
@@ -353,13 +391,79 @@ class PolicyNode : public rclcpp::Node {
           standing_pose_complete_ = controller_->standing_pose_complete();
           if (controller_->upright_fault()) {
             run_state_ = StatusMsg::STATE_FAULT;
-            fault_ = "Large orientation error detected; policy stopped";
+            posture_fault_ = true;
+            fault_ = controller_->fault_reason();
+            standing_pose_complete_ = false;
             ready_ = false;
             RCLCPP_ERROR(get_logger(), "%s", fault_.c_str());
+          } else {
+            // Fault admission precedes publication. This does not command DAMP
+            // or claim that stopping publication unloads the previous target.
+            low_cmd_publisher_->publish(low_cmd_);
+            command_published = true;
+            ready_ = low_cmd_publisher_->get_subscription_count() > 0;
           }
         }
+        trace_session = session_;
+        trace_step = step_;
+        trace_policy = active_policy_;
+        trace_complete = standing_pose_complete_;
+        trace_timeout = command_timed_out_;
+        trace_fault = fault_;
       }
       PublishStatus();
+      if (measured && trace_publisher_->get_subscription_count() > 0) {
+        try {
+          msg::PolicyTrace trace;
+          trace.stamp = now();
+          trace.session = trace_session;
+          trace.step = trace_step;
+          trace.low_state_sequence = measured_sequence;
+          trace.command_published = command_published;
+          trace.output_valid = !error.has_value();
+          trace.source_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+              inference_start.time_since_epoch()).count();
+          trace.low_state_age_s = measured_age_s;
+          trace.stand_stable_s = controller_->stand_stable_s();
+          trace.requested_sit = command.squat;
+          trace.requested_pose = static_cast<uint8_t>(command.pose);
+          trace.velocity_command.assign(command.velocity.begin(), command.velocity.end());
+          trace.head_target.assign(command.head_target.begin(), command.head_target.end());
+          if (!error && controller_->active_policy() == ActivePolicy::kSit) {
+            const auto* sit = controller_->sit_trace();
+            if (sit) {
+              trace.sit_observation = sit->observation;
+              trace.sit_state_in = sit->state_in;
+              trace.sit_state_out = sit->state_out;
+              trace.sit_raw_actions = sit->raw_actions;
+              trace.sit_raw_targets = sit->raw_targets;
+              trace.sit_reference_q = sit->reference_q;
+              trace.sit_reference_dq = sit->reference_dq;
+              trace.sit_reference_quat = sit->reference_quat;
+              trace.sit_next_reference_q = sit->next_reference_q;
+              trace.sit_next_reference_dq = sit->next_reference_dq;
+              trace.sit_body_pos = sit->body_pos;
+              trace.sit_body_quat = sit->body_quat;
+              trace.sit_body_lin_vel = sit->body_lin_vel;
+              trace.sit_body_ang_vel = sit->body_ang_vel;
+              trace.sit_enabled = sit->enabled;
+              trace.sit_arm_limit = sit->arm_limit;
+              trace.sit_orientation_error_rad = sit->reference_orientation_error_rad;
+            }
+          }
+          trace.inference_ms = inference_ms;
+          trace.active_policy = trace_policy;
+          trace.standing_pose_complete = trace_complete;
+          trace.command_timed_out = trace_timeout;
+          trace.fault = trace_fault;
+          trace.measured = *measured;
+          trace.command = low_cmd_;
+          trace_publisher_->publish(trace);
+        } catch (const std::exception& exc) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                              "Diagnostic trace failed: %s", exc.what());
+        }
+      }
     }
   }
 
@@ -377,11 +481,15 @@ class PolicyNode : public rclcpp::Node {
       status.inference_ms = inference_ms_;
       status.step = step_;
       status.fault = fault_;
+      status.posture_fault = posture_fault_;
+      status.instance_id = instance_id_;
       status.active_policy = active_policy_;
       status.squat_started = squat_started_;
       status.standing_pose_complete = standing_pose_complete_;
     }
     status.stamp = now();
+    status.source_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        Clock::now().time_since_epoch()).count();
     status_publisher_->publish(status);
   }
 
@@ -394,6 +502,7 @@ class PolicyNode : public rclcpp::Node {
 
   rclcpp::Publisher<LowCmd>::SharedPtr low_cmd_publisher_;
   rclcpp::Publisher<StatusMsg>::SharedPtr status_publisher_;
+  rclcpp::Publisher<msg::PolicyTrace>::SharedPtr trace_publisher_;
   rclcpp::Subscription<LowState>::SharedPtr low_state_subscription_;
   rclcpp::Subscription<CommandMsg>::SharedPtr command_subscription_;
   rclcpp::Service<srv::StartPolicy>::SharedPtr start_service_;
@@ -406,6 +515,9 @@ class PolicyNode : public rclcpp::Node {
   std::thread control_thread_;
   bool shutdown_ = false;
   RobotState state_;
+  LowState::ConstSharedPtr trace_low_state_;
+  uint64_t trace_low_state_sequence_ = 0;
+  Clock::time_point trace_low_state_time_{};
   float max_joint_speed_ = 0.0F;
   bool has_low_state_ = false;
   uint64_t low_state_count_ = 0;
@@ -424,6 +536,9 @@ class PolicyNode : public rclcpp::Node {
   bool squat_started_ = false;
   bool standing_pose_complete_ = false;
   std::string fault_;
+  bool posture_fault_ = false;
+  const uint64_t instance_id_ = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      Clock::now().time_since_epoch()).count();
 };
 
 }  // namespace

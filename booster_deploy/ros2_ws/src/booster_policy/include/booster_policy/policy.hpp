@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <onnxruntime_cxx_api.h>
+#include "booster_policy/stand_guard.hpp"
 
 namespace booster_policy {
 
@@ -95,6 +96,9 @@ struct RobotState {
   std::array<float, 4> root_quat{1.0F, 0.0F, 0.0F, 0.0F};
   std::vector<float> joint_pos;
   std::vector<float> joint_vel;
+  // ROS caller marks duplicate/stale source frames. Offline callers supply
+  // a fresh measured frame per Step unless explicitly testing stale input.
+  bool fresh_measurement = true;
 };
 
 struct PolicyCommand {
@@ -109,6 +113,18 @@ struct JointCommand {
   std::vector<float> position;
   std::vector<float> stiffness;
   std::vector<float> damping;
+};
+
+// Copies of the exact SIT inference, before recurrent feedback or target edits.
+// Diagnostics do not change observations/actions or participate in readiness.
+struct SitTrace {
+  std::vector<float> observation, raw_actions, raw_targets;
+  std::vector<int64_t> state_in, state_out;
+  std::vector<float> reference_q, reference_dq, reference_quat;
+  std::vector<float> next_reference_q, next_reference_dq;
+  std::vector<float> body_pos, body_quat, body_lin_vel, body_ang_vel;
+  float enabled = 0.0F, arm_limit = 0.0F;
+  float reference_orientation_error_rad = 0.0F;
 };
 
 // World-from-base (w, x, y, z) for IMU roll/pitch/yaw in the XYZ convention.
@@ -196,7 +212,7 @@ class SquatPolicy {
 //
 // The model carries its own trajectory state machine and returns the next
 // reference frame on every call; deployment only feeds the returned state and
-// reference back in. It has no orientation safety fallback.
+// reference back in. Measured completion is checked separately by StandGuard.
 class SitPolicy {
  public:
   explicit SitPolicy(const PolicyConfig& config);
@@ -208,6 +224,8 @@ class SitPolicy {
                            const std::array<float, 2>& head_target);
   // Standing means the trajectory state is back at its [0, 0, 1] sentinel.
   bool IsStandingPose() const;
+  float StandingLegError(const RobotState& state) const;
+  const SitTrace& trace() const { return trace_; }
   const JointCommand& gains() const { return command_; }
   // Offsets (rad) last added to the left and right ankle-pitch targets.
   const std::array<float, 2>& ankle_offsets() const { return ankle_offset_; }
@@ -275,9 +293,11 @@ class SitPolicy {
   std::array<float, 4> ref_anchor_quat_{};
   std::array<float, 4> init_reference_yaw_inv_{};
   std::array<float, 4> init_root_yaw_inv_{};
-  // The root heading is latched on the first step after a reset.
+  // The root heading is latched on the first step after a reset and again on
+  // the first step after the trajectory wraps to its standing sentinel.
   bool root_yaw_initialized_ = false;
   JointCommand command_;
+  SitTrace trace_;
 };
 
 // History-encoder joystick gait with in-process squat and sit policies.
@@ -303,6 +323,9 @@ class WalkPolicy {
   // Only available when a sit model is configured.
   const JointCommand& sit_gains() const;
   const std::array<float, 2>& sit_ankle_offsets() const;
+  const SitTrace* sit_trace() const { return sit_ ? &sit_->trace() : nullptr; }
+  const std::string& stand_fault() const { return stand_guard_.fault(); }
+  float stand_stable_s() const { return stand_guard_.stable_s(); }
 
  private:
   void ValidateModel() const;
@@ -330,6 +353,8 @@ class WalkPolicy {
   bool squat_complete_ = false;
   bool return_to_walk_ = false;
   bool upright_violation_ = false;
+  StandGuard stand_guard_;
+  bool stand_measured_complete_ = false;
 };
 
 // Owns the configured policy and derives the squat lifecycle events the
@@ -342,8 +367,7 @@ class PolicyController {
   PolicyController& operator=(const PolicyController&) = delete;
 
   void Reset();
-  // Runs one policy step. After an upright violation the returned command is
-  // still valid, but callers should stop publishing once they have sent it.
+  // Runs one policy step. Callers must check fault BEFORE publishing targets.
   const JointCommand& Step(const RobotState& state, const PolicyCommand& command);
 
   const PolicyConfig& config() const { return config_; }
@@ -351,6 +375,9 @@ class PolicyController {
   bool squat_started() const { return squat_started_; }
   bool standing_pose_complete() const { return standing_pose_complete_; }
   bool upright_fault() const { return upright_fault_; }
+  std::string fault_reason() const;
+  const SitTrace* sit_trace() const { return walk_ ? walk_->sit_trace() : nullptr; }
+  float stand_stable_s() const { return walk_ ? walk_->stand_stable_s() : 0.0F; }
   // Only available in walk mode.
   const WalkPolicy& walk() const;
 

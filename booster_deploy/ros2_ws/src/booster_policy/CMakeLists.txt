@@ -39,8 +39,9 @@ find_package(pybind11 CONFIG REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PolicyCommand.msg"
   "msg/PolicyStatus.msg"
+  "msg/PolicyTrace.msg"
   "srv/StartPolicy.srv"
-  DEPENDENCIES builtin_interfaces
+  DEPENDENCIES builtin_interfaces booster_interface
 )
 
 # ROS-independent inference core, shared by the node and the Python bindings.

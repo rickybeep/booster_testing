@@ -25,3 +25,8 @@ float32 max_joint_speed
 float32 inference_ms
 uint64 step
 string fault
+# Same-host monotonic provenance for the separate confirmed-fall supervisor.
+uint64 source_steady_ns
+uint64 instance_id
+# Typed posture failure, never set for RPC/ARM/timeouts or ordinary STOP.
+bool posture_fault

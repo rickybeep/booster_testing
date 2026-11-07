@@ -3,6 +3,7 @@ import logging
 import signal
 import time
 import threading
+from pathlib import Path
 
 import rclpy
 from rclpy.executors import SingleThreadedExecutor, ExternalShutdownException
@@ -144,6 +145,8 @@ class BoosterRobotPortal:
             return False
         fault = self.policy.fault
         if fault is not None:
+            if getattr(self.policy.status, "posture_fault", False):
+                self._posture_fault_observed = True
             self.logger.error("Policy node fault: %s", fault)
             self.exit_event.set()
             return False
@@ -201,12 +204,21 @@ class BoosterRobotPortal:
 
     def cancel_policy(self) -> None:
         if self.policy is not None:
+            if getattr(self.policy.status, "posture_fault", False):
+                self._posture_fault_observed = True
             self.policy.stop()
         self._policy_start_logged = False
         self._exit_custom_mode()
 
     def _exit_custom_mode(self) -> None:
         """Return firmware control to WALKING after learned CUSTOM control ends."""
+        status = self.policy.status if self.policy is not None else None
+        if (getattr(self, "_posture_fault_observed", False)
+                or getattr(status, "posture_fault", False)
+                or Path('/var/lib/k1-fall-guard/latch.json').exists()):
+            self._posture_fault_observed = True
+            self.logger.error("Posture fault: cleanup must not request WALK; confirmed-fall supervisor owns DAMP")
+            return
         if self.current_mode != RobotMode.CUSTOM:
             return
         try:

@@ -49,7 +49,12 @@ constexpr float kSitHeadRate = 1.5F;
 // walk: diagonal-biased random targets, a constant 0.8 rad/s slew, a 2-4 s
 // hold, and sometimes a longer stare instead of a new target.
 constexpr float kLookYaw = 0.85F;
-constexpr float kLookPitch = 0.22F;
+// K1 pitch is negative upward. Mix level looks with gentle upward glances.
+constexpr float kHeadPitchMin = -0.30F;
+constexpr float kHeadPitchMax = 0.0F;
+constexpr float kLookPitchMin = -0.22F;
+constexpr float kLookPitchMax = 0.0F;
+constexpr float kLookLevelChance = 0.35F;
 constexpr float kLookRate = 0.8F;
 constexpr float kLookMinYawMove = 0.25F;
 constexpr float kLookMinPitchMove = 0.08F;
@@ -692,6 +697,7 @@ void SitPolicy::LatchOutputs() {
 }
 
 void SitPolicy::Reset() {
+  trace_ = {};
   last_action_.assign(kSitActionCount, 0.0F);
   root_yaw_initialized_ = false;
   head_initialized_ = false;
@@ -754,10 +760,36 @@ const JointCommand& SitPolicy::Step(const RobotState& state, bool sit,
   const bool settling = wiggle_envelope_ > 0.0F || wiggle_settle_left_ > 0.0F;
   model_.input(1)[0] = sit || settling ? 1.0F : 0.0F;
 
+  trace_.observation = model_.input(0);
+  trace_.state_in = model_.int64_input(2);
+  trace_.enabled = model_.input(1)[0];
+  trace_.reference_q = ref_joint_pos_;
+  trace_.reference_dq = ref_joint_vel_;
+  trace_.reference_quat.assign(ref_anchor_quat_.begin(), ref_anchor_quat_.end());
+  trace_.reference_orientation_error_rad = std::acos(std::clamp(
+      (rotation[0] + rotation[4] + rotation[8] - 1.0F) * 0.5F, -1.0F, 1.0F));
+
+  const bool was_standing = IsStandingPose();
   model_.Run();
   const std::vector<float>& action = model_.output(0);
+  trace_.raw_actions = action;
+  trace_.state_out = model_.int64_output(1);
+  trace_.next_reference_q = model_.output(2);
+  trace_.next_reference_dq = model_.output(3);
+  trace_.body_pos = model_.output(4);
+  trace_.body_quat = model_.output(5);
+  trace_.body_lin_vel = model_.output(6);
+  trace_.body_ang_vel = model_.output(7);
   std::copy(action.begin(), action.end(), last_action_.begin());
   LatchOutputs();
+  // The stand-up reference turns the trunk about 120 degrees and the robot
+  // follows; the wrap to the standing sentinel snaps it back to frame zero.
+  // Re-latch both headings there so the terminal phase starts aligned instead
+  // of seeing the completed turn as heading error (a stepping turn in sim).
+  if (!was_standing && IsStandingPose()) {
+    init_reference_yaw_inv_ = QuatInv(YawQuat(ref_anchor_quat_));
+    root_yaw_initialized_ = false;
+  }
 
   command_.position = config_.robot.default_joint_pos;
   for (std::size_t a = 0; a < kSitActionCount; ++a) {
@@ -765,6 +797,9 @@ const JointCommand& SitPolicy::Step(const RobotState& state, bool sit,
     command_.position[policy_to_robot_[i]] = default_joint_pos_[i] + action_scale_[a] * action[a];
   }
   const bool seated = Seated(sit);
+  trace_.raw_targets = command_.position;
+  trace_.arm_limit = Seated(sit || settling) ? config_.sit_arm_hold_torque_limit
+                                           : config_.sit_arm_move_torque_limit;
   SteerHead(state, seated, head_target);
   WiggleAnkles(seated);
   LimitArmTorque(state, Seated(sit || settling));
@@ -790,6 +825,7 @@ void SitPolicy::SteerHead(const RobotState& state, bool seated,
     operator_target_ = head_target;
     operator_idle_ = kOperatorIdle;
     look_target_ = head_position_;
+    look_target_[1] = std::clamp(look_target_[1], kLookPitchMin, kLookPitchMax);
     look_hold_ = Uniform(kLookHoldMin, kLookHoldMax);
   }
   was_seated_ = seated;
@@ -812,6 +848,7 @@ void SitPolicy::SteerHead(const RobotState& state, bool seated,
       look_hold_ = 0.0F;
     }
   }
+  goal[1] = std::clamp(goal[1], kHeadPitchMin, kHeadPitchMax);
   const float max_step = rate * dt;
   for (std::size_t k = 0; k < head_position_.size(); ++k) {
     head_position_[k] += std::clamp(goal[k] - head_position_[k], -max_step, max_step);
@@ -820,6 +857,9 @@ void SitPolicy::SteerHead(const RobotState& state, bool seated,
 }
 
 std::array<float, 2> SitPolicy::LookAround() {
+  // An operator can leave an out-of-range target behind. Enter the idle range
+  // before testing arrival, otherwise a clipped old downward target never lands.
+  look_target_[1] = std::clamp(look_target_[1], kLookPitchMin, kLookPitchMax);
   const bool arrived = std::abs(head_position_[0] - look_target_[0]) < 1e-3F &&
                        std::abs(head_position_[1] - look_target_[1]) < 1e-3F;
   if (!arrived) {
@@ -836,17 +876,19 @@ std::array<float, 2> SitPolicy::LookAround() {
   // Both axes must move visibly, and mostly single-axis moves are rejected so
   // the gaze sweeps diagonally.
   const auto [yaw0, pitch0] = look_target_;
-  look_target_ = {yaw0 < 0.0F ? kLookYaw : -kLookYaw, pitch0 < 0.0F ? kLookPitch : -kLookPitch};
+  look_target_ = {yaw0 < 0.0F ? kLookYaw : -kLookYaw,
+                 pitch0 < (kLookPitchMin + kLookPitchMax) / 2.0F ? kLookPitchMax : kLookPitchMin};
   for (int attempt = 0; attempt < 40; ++attempt) {
     const float yaw = Uniform(-kLookYaw, kLookYaw);
-    const float pitch = Uniform(-kLookPitch, kLookPitch);
+    const float pitch = Uniform(0.0F, 1.0F) < kLookLevelChance
+                            ? 0.0F : Uniform(kLookPitchMin, kLookPitchMax);
     const float dy = std::abs(yaw - yaw0);
     const float dp = std::abs(pitch - pitch0);
     if (dy < kLookMinYawMove || dp < kLookMinPitchMove) {
       continue;
     }
     const float ny = dy / (2.0F * kLookYaw);
-    const float np = dp / (2.0F * kLookPitch);
+    const float np = dp / (kLookPitchMax - kLookPitchMin);
     if (std::min(ny, np) / std::max(ny, np) >= kLookMinAxisRatio) {
       look_target_ = {yaw, pitch};
       break;
@@ -935,6 +977,19 @@ void SitPolicy::LimitArmTorque(const RobotState& state, bool seated) {
 bool SitPolicy::IsStandingPose() const {
   const auto& current = model_.int64_input(2);
   return std::equal(current.begin(), current.end(), kSitStandingState.begin());
+}
+
+float SitPolicy::StandingLegError(const RobotState& state) const {
+  float error = 0.0F;
+  for (std::size_t i = 0; i < policy_to_robot_.size(); ++i) {
+    const auto r = policy_to_robot_[i];
+    const auto& name = config_.robot.joint_names[r];
+    if (name.find("Hip") != std::string::npos || name.find("Knee") != std::string::npos
+        || name.find("Ankle") != std::string::npos) {
+      error = std::max(error, std::abs(state.joint_pos[r] - ref_joint_pos_[i]));
+    }
+  }
+  return error;
 }
 
 WalkPolicy::WalkPolicy(const PolicyConfig& config)
@@ -1046,6 +1101,8 @@ void WalkPolicy::ValidateRobotConfig() const {
 }
 
 void WalkPolicy::Reset() {
+  stand_guard_.Reset();
+  stand_measured_complete_ = false;
   last_action_.assign(kPolicyJointCount, 0.0F);
   history_initialized_ = false;
   active_policy_ = ActivePolicy::kWalk;
@@ -1107,11 +1164,13 @@ const JointCommand& WalkPolicy::WalkInference(const RobotState& state,
     command_.position[policy_to_robot_[i]] = default_joint_pos_[i] + action_scale_[i] * action[i];
   }
   command_.position[head_indices_[0]] = command.head_target[0];
-  command_.position[head_indices_[1]] = command.head_target[1];
+  command_.position[head_indices_[1]] = std::clamp(command.head_target[1], kHeadPitchMin, kHeadPitchMax);
   return command_;
 }
 
 void WalkPolicy::StartPose(PosePolicy pose) {
+  stand_guard_.Reset();
+  stand_measured_complete_ = false;
   if (pose == PosePolicy::kSit) {
     if (!sit_) {
       throw std::invalid_argument("Sit was commanded but no sit model is configured");
@@ -1136,8 +1195,29 @@ void WalkPolicy::ResumeWalk() {
 }
 
 const JointCommand& WalkPolicy::Step(const RobotState& state, const PolicyCommand& command) {
+  float gyro2 = 0.0F, leg_speed = 0.0F;
+  for (float v : state.angular_velocity) gyro2 += v * v;
+  for (std::size_t i = 0; i < state.joint_vel.size(); ++i) {
+    const auto& name = config_.robot.joint_names[i];
+    if (name.find("Hip") != std::string::npos || name.find("Knee") != std::string::npos
+        || name.find("Ankle") != std::string::npos) {
+      leg_speed = std::max(leg_speed, std::abs(state.joint_vel[i]));
+    }
+  }
   if (return_to_walk_) {
-    ResumeWalk();
+    // Restore the next-tick WALK handoff at the model's terminal state.
+    // Do not demand motionless joints before enabling the balancing policy.
+    // Still reject a fallen/nonfinite pose and cancel if SIT was requested again.
+    if (active_policy_ != ActivePolicy::kSit ||
+        (!command.squat && stand_measured_complete_ && state.fresh_measurement &&
+         StandGuard::CanBalance(-state.projected_gravity[2], std::sqrt(gyro2),
+                            leg_speed, sit_->StandingLegError(state)))) {
+      ResumeWalk();
+    } else {
+      return_to_walk_ = false;
+      squat_complete_ = false;
+      stand_measured_complete_ = false;
+    }
   }
   if (active_policy_ == ActivePolicy::kWalk) {
     if (!command.squat) {
@@ -1150,7 +1230,10 @@ const JointCommand& WalkPolicy::Step(const RobotState& state, const PolicyComman
   const JointCommand* targets = nullptr;
   if (active_policy_ == ActivePolicy::kSit) {
     targets = &sit_->Step(state, command.squat, command.head_target);
-    upright_violation_ = false;
+    stand_measured_complete_ = stand_guard_.Update(
+        command.squat, sit_->IsStandingPose(), config_.policy_dt,
+        -state.projected_gravity[2], std::sqrt(gyro2), leg_speed, sit_->StandingLegError(state), state.fresh_measurement);
+    upright_violation_ = !stand_guard_.fault().empty();
   } else {
     targets = &squat_.Step(state, command.squat);
     upright_violation_ = squat_.upright_violation();
@@ -1158,6 +1241,7 @@ const JointCommand& WalkPolicy::Step(const RobotState& state, const PolicyComman
   const bool standing = IsStandingPose(state);
   if (!standing) {
     squat_started_ = true;
+    squat_complete_ = false;
   }
   if (!command.squat && standing) {
     squat_complete_ = true;
@@ -1171,7 +1255,7 @@ bool WalkPolicy::IsStandingPose(const RobotState& state) const {
     case ActivePolicy::kWalk:
       return true;
     case ActivePolicy::kSit:
-      return sit_->IsStandingPose();
+      return stand_measured_complete_;
     case ActivePolicy::kSquat:
       break;
   }
@@ -1224,6 +1308,18 @@ void PolicyController::ValidateState(const RobotState& state) const {
   if (state.joint_pos.size() != kPolicyJointCount || state.joint_vel.size() != kPolicyJointCount) {
     throw std::invalid_argument("Robot state must contain 22 joint positions and velocities");
   }
+  const auto finite = [](const auto& values) {
+    return std::all_of(values.begin(), values.end(), [](float v) { return std::isfinite(v); });
+  };
+  if (!finite(state.joint_pos) || !finite(state.joint_vel) || !finite(state.angular_velocity)
+      || !finite(state.projected_gravity) || !finite(state.root_quat)) {
+    throw std::invalid_argument("Nonfinite robot state");
+  }
+}
+
+std::string PolicyController::fault_reason() const {
+  if (walk_ && !walk_->stand_fault().empty()) return walk_->stand_fault();
+  return upright_fault_ ? "Large orientation error detected; policy stopped" : "";
 }
 
 const JointCommand& PolicyController::Step(const RobotState& state,

@@ -43,6 +43,15 @@ PYBIND11_MODULE(booster_policy_core, m) {
   m.attr("MAX_TRANSLATIONAL_SPEED") = kMaxTranslationalSpeed;
   m.attr("MAX_YAW_RATE") = kMaxYawRate;
 
+  py::class_<StandGuard>(m, "StandGuard")
+      .def(py::init<>())
+      .def("reset", &StandGuard::Reset)
+      .def("update", &StandGuard::Update, py::arg("requested_sit"), py::arg("terminal"),
+           py::arg("dt"), py::arg("upright"), py::arg("gyro"), py::arg("leg_speed"),
+           py::arg("leg_error"), py::arg("fresh") = true)
+      .def_property_readonly("fault", &StandGuard::fault)
+      .def_property_readonly("stable_s", &StandGuard::stable_s);
+
   py::enum_<PolicyMode>(m, "PolicyMode")
       .value("WALK", PolicyMode::kWalk)
       .value("SQUAT", PolicyMode::kSquat);
@@ -120,6 +129,22 @@ PYBIND11_MODULE(booster_policy_core, m) {
       .def_property_readonly("squat_started", &PolicyController::squat_started)
       .def_property_readonly("standing_pose_complete", &PolicyController::standing_pose_complete)
       .def_property_readonly("upright_fault", &PolicyController::upright_fault)
+      .def_property_readonly("fault_reason", &PolicyController::fault_reason)
+      .def_property_readonly("stand_stable_s", &PolicyController::stand_stable_s)
+      .def_property_readonly("sit_trace", [](const PolicyController& controller) {
+        py::dict d;
+        const auto* t = controller.sit_trace();
+        if (t) {
+          d["state_in"] = t->state_in; d["state_out"] = t->state_out;
+          d["observation"] = t->observation; d["raw_actions"] = t->raw_actions;
+          d["raw_targets"] = t->raw_targets; d["reference_q"] = t->reference_q;
+          d["reference_dq"] = t->reference_dq; d["reference_quat"] = t->reference_quat;
+          d["next_reference_q"] = t->next_reference_q;
+          d["enabled"] = t->enabled; d["arm_limit"] = t->arm_limit;
+          d["orientation_error_rad"] = t->reference_orientation_error_rad;
+        }
+        return d;
+      })
       .def_property_readonly(
           "walk_history",
           [](const PolicyController& controller) {
