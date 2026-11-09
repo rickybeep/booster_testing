@@ -13,9 +13,8 @@
 
 namespace booster_policy {
 
-// Walk and squat control all 22 K1 joints, including the head; the sit policy
-// controls the other 20, and while seated the head follows the operator or
-// looks around.
+// Every policy controls all 22 K1 joints, including the head; while seated the
+// head follows the operator or looks around instead of the sit policy.
 inline constexpr std::size_t kPolicyJointCount = 22;
 
 // Walk policy layout: 50 frames of angular velocity (3), projected gravity (3),
@@ -31,12 +30,17 @@ inline constexpr float kMaxYawRate = 2.4F;
 inline constexpr std::size_t kSquatObservationSize = 73;
 inline constexpr float kSquatHeadActionScaleMultiplier = 0.1F;
 
-// Sit policy layout: reference joint positions and velocities (44), anchor
-// orientation error (6), angular velocity (3), joint position offsets (22),
-// joint velocities (22), previous actions (20), and projected gravity (3).
-inline constexpr std::size_t kSitObservationSize = 120;
-inline constexpr std::size_t kSitActionCount = 20;
-inline constexpr std::size_t kSitStateSize = 3;
+// Sit policy layout (booster-lab SuperMimic): `actor_obs` holds 10
+// chronological frames of joint position offsets (22), joint velocities (22),
+// angular velocity (3), projected gravity (3), and previous actions (22).
+// `goal` holds the next 10 reference frames, each the reference trunk
+// orientation in the robot trunk frame (first two rotation-matrix columns, 6),
+// its heading-frame linear velocity (3), trunk-frame angular velocity (3),
+// height (1), joint position offsets (22), and joint velocities (22).
+inline constexpr std::size_t kSitHistoryLength = 10;
+inline constexpr std::size_t kSitObservationSize = 72;
+inline constexpr std::size_t kSitGoalFrames = 10;
+inline constexpr std::size_t kSitGoalFrameSize = 57;
 
 enum class PolicyMode { kWalk, kSquat };
 enum class ActivePolicy { kWalk, kSquat, kSit };
@@ -60,7 +64,8 @@ struct PolicyConfig {
   std::string walk_gain_overrides_path;
   std::string squat_model_path;
   std::string squat_gain_overrides_path;
-  // Walk mode only; empty leaves sit unavailable. Sit uses its ONNX gains.
+  // Walk mode only; empty leaves sit unavailable. Sit uses its ONNX gains and
+  // plays the clip in the `.motion.json` beside the model.
   std::string sit_model_path;
   // Sit arm torque caps in Nm: each arm target stays within limit / stiffness
   // of the measured joint position. Hold applies while seated, move while
@@ -115,8 +120,10 @@ struct JointCommand {
   std::vector<float> damping;
 };
 
-// Copies of the exact SIT inference, before recurrent feedback or target edits.
-// Diagnostics do not change observations/actions or participate in readiness.
+// Copies of the exact SIT inference, before target edits. Diagnostics do not
+// change observations/actions or participate in readiness. The states are
+// the clip playhead (phase, frame, direction) before and after the step; the
+// body fields stay empty.
 struct SitTrace {
   std::vector<float> observation, raw_actions, raw_targets;
   std::vector<int64_t> state_in, state_out;
@@ -208,21 +215,44 @@ class SquatPolicy {
   bool upright_violation_ = false;
 };
 
-// Stateful deployment wrapper for the sit motion-tracking ONNX.
-//
-// The model carries its own trajectory state machine and returns the next
-// reference frame on every call; deployment only feeds the returned state and
-// reference back in. Measured completion is checked separately by StandGuard.
+// One frame of the sit clip, joints in policy order.
+struct SitClipFrame {
+  std::array<float, 3> root_pos{};
+  std::array<float, 4> root_quat{};  // World-from-trunk (w, x, y, z).
+  std::array<float, 3> root_lin_vel_w{};
+  std::array<float, 3> root_ang_vel_w{};
+  std::vector<float> joint_pos;
+  std::vector<float> joint_vel;
+};
+
+// Where the sit clip plays, with booster-lab's toggle-tracking timing: a sit
+// request plays the clip forward into its seated loop, which repeats while sit
+// is held; releasing sit plays the rest, the stand-up. Releasing sit while
+// sitting down plays back toward standing; asking again while standing up
+// plays back into the loop. Standing holds frame zero before the first sit
+// and the last frame after a stand-up.
+struct SitPlayhead {
+  enum class Phase : int64_t { kStanding = 0, kSittingDown = 1, kSeated = 2, kStandingUp = 3 };
+  Phase phase = Phase::kStanding;
+  int64_t frame = 0;
+  // -1 while playing back.
+  int64_t direction = 1;
+};
+
+// Deployment wrapper for the SuperMimic sit policy: one motion tracker shown
+// the next reference frames of the sit clip, played by a SitPlayhead.
+// Measured completion is checked separately by StandGuard.
 class SitPolicy {
  public:
   explicit SitPolicy(const PolicyConfig& config);
 
-  // Restores the standing state and the embedded frame-zero reference.
+  // Back to standing at the clip's first frame; the next step re-aligns the
+  // clip heading with the robot's.
   void Reset();
   // `head_target` (yaw, pitch) is followed only while seated.
   const JointCommand& Step(const RobotState& state, bool sit,
                            const std::array<float, 2>& head_target);
-  // Standing means the trajectory state is back at its [0, 0, 1] sentinel.
+  // Standing means the playhead is in its standing phase.
   bool IsStandingPose() const;
   float StandingLegError(const RobotState& state) const;
   const SitTrace& trace() const { return trace_; }
@@ -244,11 +274,17 @@ class SitPolicy {
 
   void ValidateModel() const;
   void ValidateRobotConfig() const;
-  // Feeds the returned state back in and latches the next reference frame.
-  void LatchOutputs();
-  // Sit requested and the trajectory in its seated loop.
+  void LoadClip(const std::string& path);
+  // The playhead one control step later.
+  SitPlayhead Advance(SitPlayhead playhead, bool sit) const;
+  // Writes the goal for the frames after `playhead`.
+  void WriteGoal(const RobotState& state, const SitPlayhead& playhead, bool sit);
+  // Sit requested and the playhead in its seated loop.
   bool Seated(bool sit) const;
-  void SteerHead(const RobotState& state, bool seated, const std::array<float, 2>& head_target);
+  // Seated, the head follows the operator or looks around; otherwise it moves
+  // back to the policy's own head targets, rate-limited either way.
+  void SteerHead(const RobotState& state, bool seated, const std::array<float, 2>& head_target,
+                 const std::array<float, 2>& policy_head);
   // Advances the look-around and returns its head goal (yaw, pitch).
   std::array<float, 2> LookAround();
   void WiggleAnkles(bool seated);
@@ -258,7 +294,15 @@ class SitPolicy {
 
   const PolicyConfig& config_;
   OnnxModel model_;
-  std::size_t anchor_index_ = 0;
+  std::vector<SitClipFrame> clip_;
+  int64_t loop_start_ = 0;
+  int64_t loop_end_ = 0;
+  SitPlayhead playhead_;
+  // World-from-clip heading that plays the clip from where the robot faces
+  // when a sit starts; `aligned_` is false until it is latched.
+  std::array<float, 4> clip_heading_{1.0F, 0.0F, 0.0F, 0.0F};
+  bool aligned_ = false;
+  bool history_initialized_ = false;
   std::vector<std::size_t> policy_to_robot_;
   // Robot joint index of each shoulder and elbow joint.
   std::vector<std::size_t> arm_indices_;
@@ -282,20 +326,13 @@ class SitPolicy {
   std::array<FootMotion, 2> feet_{};
   std::array<float, 2> ankle_offset_{};
   std::array<float, 2> ankle_offset_rate_{};
-  // Policy joint index for each of the 20 action slots.
-  std::vector<std::size_t> action_to_policy_;
+  // Policy joint index of the head yaw and pitch joints.
   std::vector<std::size_t> head_indices_;
   std::vector<float> default_joint_pos_;
   std::vector<float> action_scale_;
   std::vector<float> last_action_;
+  // Joint positions of the reference frame the robot is moving to.
   std::vector<float> ref_joint_pos_;
-  std::vector<float> ref_joint_vel_;
-  std::array<float, 4> ref_anchor_quat_{};
-  std::array<float, 4> init_reference_yaw_inv_{};
-  std::array<float, 4> init_root_yaw_inv_{};
-  // The root heading is latched on the first step after a reset and again on
-  // the first step after the trajectory wraps to its standing sentinel.
-  bool root_yaw_initialized_ = false;
   JointCommand command_;
   SitTrace trace_;
 };

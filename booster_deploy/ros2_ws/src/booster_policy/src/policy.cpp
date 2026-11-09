@@ -29,20 +29,15 @@ const std::unordered_map<std::string, std::string> kJointAliases = {
     {"Right_Shoulder_Pitch", "ARight_Shoulder_Pitch"},
 };
 const std::array<const char*, 2> kHeadJoints = {"Head_Yaw", "Head_Pitch"};
-const std::array<const char*, 7> kSitObservations = {
-    "command",    "motion_anchor_ori_b", "base_ang_vel", "joint_pos",
-    "joint_vel",  "actions",             "projected_gravity",
-};
-const std::vector<std::string> kSitInputs = {"obs", "squat_enabled", "squat_state_in"};
-const std::vector<std::string> kSitOutputs = {
-    "actions",     "squat_state_out", "joint_pos",      "joint_vel",
-    "body_pos_w",  "body_quat_w",     "body_lin_vel_w", "body_ang_vel_w",
-};
-const std::array<int64_t, kSitStateSize> kSitStandingState = {0, 0, 1};
-// Trajectory state element 1 is the phase: 1 sitting down, 2 seated (a short
-// idle loop), 3 standing up. Both shipped sit models behave this way.
-constexpr std::size_t kSitPhaseIndex = 1;
-constexpr int64_t kSitSeatedPhase = 2;
+const std::vector<std::string> kSitInputs = {"actor_obs", "goal"};
+const std::vector<std::string> kSitOutputs = {"actions"};
+// The layouts booster-lab's SuperMimic export records; SitPolicy builds these.
+const char* const kSitObservationLayout =
+    "joint_pos_rel+encoder_bias, joint_vel, imu_ang_vel_b, projected_gravity, last_action";
+const char* const kSitGoalFrameLayout =
+    "R_rel[:,0], R_rel[:,1], ref_lin_vel_heading, ref_ang_vel_b, ref_height, "
+    "ref_joint_pos_rel, ref_joint_vel";
+const char* const kSitMotionSuffix = ".motion.json";
 // Fastest head motion (rad/s) toward the operator's target or back to zero.
 constexpr float kSitHeadRate = 1.5F;
 // Seated look-around, matching the track-control idle gaze on the learned
@@ -582,25 +577,15 @@ SitPolicy::SitPolicy(const PolicyConfig& config)
   model_.BindBuffers();
 
   const auto joint_names = Csv(model_, "joint_names");
-  const auto body_names = Csv(model_, "body_names");
-  const auto anchor = model_.metadata().find("anchor_body_name");
-  if (anchor == model_.metadata().end()) {
-    throw std::invalid_argument("Sit ONNX metadata is missing 'anchor_body_name'");
-  }
-  const auto anchor_it = std::find(body_names.begin(), body_names.end(), anchor->second);
-  if (anchor_it == body_names.end()) {
-    throw std::invalid_argument("Sit ONNX anchor body '" + anchor->second +
-                                "' is not in body_names");
-  }
-  anchor_index_ = static_cast<std::size_t>(anchor_it - body_names.begin());
   default_joint_pos_ = FloatCsv(model_, "default_joint_pos");
   action_scale_ = FloatCsv(model_, "action_scale");
   for (std::size_t i = 0; i < joint_names.size(); ++i) {
     policy_to_robot_.push_back(RobotIndex(config_.robot, joint_names[i], "Sit"));
-    const bool head = std::find_if(kHeadJoints.begin(), kHeadJoints.end(), [&](const char* name) {
-                        return joint_names[i] == name;
-                      }) != kHeadJoints.end();
-    (head ? head_indices_ : action_to_policy_).push_back(i);
+    if (std::find_if(kHeadJoints.begin(), kHeadJoints.end(), [&](const char* name) {
+          return joint_names[i] == name;
+        }) != kHeadJoints.end()) {
+      head_indices_.push_back(i);
+    }
     if (joint_names[i].find("Shoulder") != std::string::npos ||
         joint_names[i].find("Elbow") != std::string::npos) {
       arm_indices_.push_back(policy_to_robot_[i]);
@@ -620,6 +605,12 @@ SitPolicy::SitPolicy(const PolicyConfig& config)
   if (!(config_.policy_dt > 0.0F)) {
     throw std::invalid_argument("Sit policy_dt must be positive");
   }
+  const std::string& path = config_.sit_model_path;
+  const std::size_t dot = path.rfind(".onnx");
+  if (dot == std::string::npos || dot + 5 != path.size()) {
+    throw std::invalid_argument("Sit model path must end in .onnx: " + path);
+  }
+  LoadClip(path.substr(0, dot) + kSitMotionSuffix);
   rng_.seed(std::random_device{}());
 
   // The policy artifact owns its deployment gains; sit has no file overrides.
@@ -641,31 +632,35 @@ void SitPolicy::ValidateModel() const {
                                 "; expected " + Join(kSitOutputs));
   }
   const auto expect_shape = [](const std::vector<int64_t>& actual,
-                                   const std::vector<int64_t>& expected, const char* name) {
+                               const std::vector<int64_t>& expected, const char* name) {
     if (actual != expected) {
       throw std::invalid_argument(std::string("Sit ONNX ") + name + " must be " +
                                   ShapeString(expected) + ", got " + ShapeString(actual));
     }
   };
-  const auto body_count = static_cast<int64_t>(Csv(model_, "body_names").size());
-  const auto joints = static_cast<int64_t>(kPolicyJointCount);
-  const auto state_size = static_cast<int64_t>(kSitStateSize);
-  expect_shape(model_.input_shapes()[0], {1, kSitObservationSize}, "obs");
-  expect_shape(model_.input_shapes()[1], {1, 1}, "squat_enabled");
-  expect_shape(model_.input_shapes()[2], {1, state_size}, "squat_state_in");
-  expect_shape(model_.output_shapes()[0], {1, kSitActionCount}, "actions");
-  expect_shape(model_.output_shapes()[1], {1, state_size}, "squat_state_out");
-  expect_shape(model_.output_shapes()[2], {1, joints}, "joint_pos");
-  expect_shape(model_.output_shapes()[3], {1, joints}, "joint_vel");
-  expect_shape(model_.output_shapes()[5], {1, body_count, 4}, "body_quat_w");
-  if (model_.input_types()[2] != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
-      model_.output_types()[1] != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    throw std::invalid_argument("Sit ONNX trajectory state must be int64");
+  expect_shape(model_.input_shapes()[0],
+               {1, static_cast<int64_t>(kSitHistoryLength * kSitObservationSize)}, "actor_obs");
+  expect_shape(model_.input_shapes()[1],
+               {1, static_cast<int64_t>(kSitGoalFrames * kSitGoalFrameSize)}, "goal");
+  expect_shape(model_.output_shapes()[0], {1, static_cast<int64_t>(kPolicyJointCount)},
+               "actions");
+  for (const auto& [key, expected] :
+       {std::pair{"observation_layout", kSitObservationLayout},
+        std::pair{"goal_frame_layout", kSitGoalFrameLayout}}) {
+    const auto it = model_.metadata().find(key);
+    if (it == model_.metadata().end() || it->second != expected) {
+      throw std::invalid_argument(std::string("Sit ONNX ") + key + " must be '" + expected + "'");
+    }
   }
-  if (Csv(model_, "observation_names") !=
-      std::vector<std::string>(kSitObservations.begin(), kSitObservations.end())) {
-    throw std::invalid_argument("Unexpected sit observation layout: " +
-                                Join(Csv(model_, "observation_names")));
+  if (FloatCsv(model_, "history_length") != std::vector<float>{static_cast<float>(kSitHistoryLength)}) {
+    throw std::invalid_argument("Sit ONNX history_length must be 10");
+  }
+  std::vector<float> offsets(kSitGoalFrames);
+  for (std::size_t k = 0; k < kSitGoalFrames; ++k) {
+    offsets[k] = static_cast<float>(k + 1);
+  }
+  if (FloatCsv(model_, "goal_offsets") != offsets) {
+    throw std::invalid_argument("Sit ONNX goal_offsets must be 1..10");
   }
   if (Csv(model_, "joint_names").size() != kPolicyJointCount) {
     throw std::invalid_argument("Sit ONNX joint count does not match the robot");
@@ -681,25 +676,162 @@ void SitPolicy::ValidateRobotConfig() const {
   if (!DefaultPoseMatches(default_joint_pos_, config_.robot, policy_to_robot_)) {
     throw std::invalid_argument("K1 default_joint_pos does not match sit ONNX metadata");
   }
-  if (action_scale_.size() != kSitActionCount || action_to_policy_.size() != kSitActionCount) {
-    throw std::invalid_argument("Sit ONNX action scale must match the 20 non-head joints");
+  CheckFinite(action_scale_, "Sit", "action_scale");
+}
+
+void SitPolicy::LoadClip(const std::string& path) {
+  std::ifstream file(path);
+  if (!file) {
+    throw std::invalid_argument("Sit motion clip not found: " + path);
+  }
+  nlohmann::json clip;
+  try {
+    file >> clip;
+    const auto names = clip.at("joint_names").get<std::vector<std::string>>();
+    const auto policy_names = Csv(model_, "joint_names");
+    std::vector<std::size_t> column;
+    for (const auto& name : policy_names) {
+      const auto it = std::find(names.begin(), names.end(), name);
+      if (it == names.end()) {
+        throw std::invalid_argument("Sit motion clip is missing joint " + name);
+      }
+      column.push_back(static_cast<std::size_t>(it - names.begin()));
+    }
+    const auto& root_pos = clip.at("root_pos");
+    const auto& root_quat = clip.at("root_quat");
+    const auto& lin_vel = clip.at("root_lin_vel_w");
+    const auto& ang_vel = clip.at("root_ang_vel_w");
+    const auto& joint_pos = clip.at("joint_pos");
+    const auto& joint_vel = clip.at("joint_vel");
+    const std::size_t frames = root_pos.size();
+    for (const auto* field : {&root_quat, &lin_vel, &ang_vel, &joint_pos, &joint_vel}) {
+      if (field->size() != frames) {
+        throw std::invalid_argument("Sit motion clip fields differ in length");
+      }
+    }
+    clip_.resize(frames);
+    for (std::size_t f = 0; f < frames; ++f) {
+      SitClipFrame& frame = clip_[f];
+      frame.root_pos = root_pos[f].get<std::array<float, 3>>();
+      frame.root_quat = root_quat[f].get<std::array<float, 4>>();
+      frame.root_lin_vel_w = lin_vel[f].get<std::array<float, 3>>();
+      frame.root_ang_vel_w = ang_vel[f].get<std::array<float, 3>>();
+      const auto q = joint_pos[f].get<std::vector<float>>();
+      const auto dq = joint_vel[f].get<std::vector<float>>();
+      if (q.size() != names.size() || dq.size() != names.size()) {
+        throw std::invalid_argument("Sit motion clip frame has the wrong joint count");
+      }
+      for (const std::size_t c : column) {
+        frame.joint_pos.push_back(q[c]);
+        frame.joint_vel.push_back(dq[c]);
+      }
+    }
+    loop_start_ = clip.at("loop_start_frame").get<int64_t>();
+    loop_end_ = clip.at("loop_end_frame").get<int64_t>();
+  } catch (const nlohmann::json::exception& exc) {
+    throw std::invalid_argument("Invalid sit motion clip " + path + ": " + exc.what());
+  }
+  // The stand-up starts after the loop and needs at least one frame.
+  if (!(0 < loop_start_ && loop_start_ <= loop_end_ &&
+        loop_end_ + 2 < static_cast<int64_t>(clip_.size()))) {
+    throw std::invalid_argument("Sit motion clip loop frames must lie inside the clip: " + path);
   }
 }
 
-void SitPolicy::LatchOutputs() {
-  const auto& next_state = model_.int64_output(1);
-  std::copy(next_state.begin(), next_state.end(), model_.int64_input(2).begin());
-  ref_joint_pos_ = model_.output(2);
-  ref_joint_vel_ = model_.output(3);
-  const auto& body_quat = model_.output(5);
-  std::copy_n(body_quat.begin() + static_cast<std::ptrdiff_t>(4 * anchor_index_), 4,
-              ref_anchor_quat_.begin());
+SitPlayhead SitPolicy::Advance(SitPlayhead p, bool sit) const {
+  // booster-lab ToggleTrackingCommand, except that a finished stand-up holds
+  // the last frame instead of wrapping to frame zero.
+  using Phase = SitPlayhead::Phase;
+  const auto last = static_cast<int64_t>(clip_.size()) - 1;
+  p.direction = 1;
+  switch (p.phase) {
+    case Phase::kStanding:
+      if (sit) {
+        p = {Phase::kSittingDown, 1, 1};
+      }
+      break;
+    case Phase::kSittingDown:
+      if (sit) {
+        if (++p.frame >= loop_start_) {
+          p = {Phase::kSeated, loop_start_, 1};
+        }
+      } else if (--p.frame <= 0) {
+        p = {Phase::kStanding, 0, 1};
+      } else {
+        p.direction = -1;
+      }
+      break;
+    case Phase::kSeated:
+      if (++p.frame > loop_end_) {
+        p = sit ? SitPlayhead{Phase::kSeated, loop_start_, 1}
+                : SitPlayhead{Phase::kStandingUp, loop_end_ + 1, 1};
+      }
+      break;
+    case Phase::kStandingUp:
+      if (!sit) {
+        if (++p.frame >= last) {
+          p = {Phase::kStanding, last, 1};
+        }
+      } else if (--p.frame < loop_end_ + 1) {
+        p = {Phase::kSeated, loop_end_, 1};
+      } else {
+        p.direction = -1;
+      }
+      break;
+  }
+  return p;
+}
+
+void SitPolicy::WriteGoal(const RobotState& state, const SitPlayhead& playhead, bool sit) {
+  // booster-lab Spaces.motion_goal, with the clip turned by its heading
+  // alignment; the reference velocities are rotated out of the clip's own
+  // frames, so the alignment drops out of them.
+  const Quat robot_inv = QuatInv(state.root_quat);
+  float* goal = model_.input(1).data();
+  SitPlayhead p = playhead;
+  for (std::size_t k = 0; k < kSitGoalFrames; ++k) {
+    p = Advance(p, sit);
+    const SitClipFrame& frame = clip_[static_cast<std::size_t>(p.frame)];
+    // Standing holds still; playing back reverses every rate.
+    const float rate = p.phase == SitPlayhead::Phase::kStanding
+                           ? 0.0F : static_cast<float>(p.direction);
+    const auto rel = MatrixFromQuat(QuatMul(robot_inv, QuatMul(clip_heading_, frame.root_quat)));
+    float* out = goal + k * kSitGoalFrameSize;
+    for (std::size_t column = 0; column < 2; ++column) {
+      for (std::size_t row = 0; row < 3; ++row) {
+        out[3 * column + row] = rel[3 * row + column];
+      }
+    }
+    const auto heading = MatrixFromQuat(YawQuat(frame.root_quat));
+    const auto trunk = MatrixFromQuat(frame.root_quat);
+    for (std::size_t i = 0; i < 3; ++i) {
+      float v = 0.0F, w = 0.0F;
+      for (std::size_t j = 0; j < 3; ++j) {
+        v += heading[3 * j + i] * frame.root_lin_vel_w[j];
+        w += trunk[3 * j + i] * frame.root_ang_vel_w[j];
+      }
+      out[6 + i] = rate * v;
+      out[9 + i] = rate * w;
+    }
+    out[12] = frame.root_pos[2];
+    for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
+      out[13 + i] = frame.joint_pos[i] - default_joint_pos_[i];
+      out[13 + kPolicyJointCount + i] = rate * frame.joint_vel[i];
+    }
+  }
 }
 
 void SitPolicy::Reset() {
   trace_ = {};
-  last_action_.assign(kSitActionCount, 0.0F);
-  root_yaw_initialized_ = false;
+  playhead_ = {};
+  aligned_ = false;
+  history_initialized_ = false;
+  ref_joint_pos_ = clip_.front().joint_pos;
+  // As in training, the previous action at the start holds the clip's first frame.
+  last_action_.assign(kPolicyJointCount, 0.0F);
+  for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
+    last_action_[i] = (clip_.front().joint_pos[i] - default_joint_pos_[i]) / action_scale_[i];
+  }
   head_initialized_ = false;
   was_seated_ = false;
   wiggle_envelope_ = 0.0F;
@@ -707,113 +839,93 @@ void SitPolicy::Reset() {
   feet_ = {};
   ankle_offset_ = {};
   ankle_offset_rate_ = {};
-
-  // A disabled standing call returns the exact frame-zero reference embedded
-  // in the model. Its action is deliberately discarded.
-  std::fill(model_.input(0).begin(), model_.input(0).end(), 0.0F);
-  model_.input(1)[0] = 0.0F;
-  std::copy(kSitStandingState.begin(), kSitStandingState.end(), model_.int64_input(2).begin());
-  model_.Run();
-  LatchOutputs();
-  init_reference_yaw_inv_ = QuatInv(YawQuat(ref_anchor_quat_));
 }
 
 const JointCommand& SitPolicy::Step(const RobotState& state, bool sit,
                                     const std::array<float, 2>& head_target) {
-  if (!root_yaw_initialized_) {
-    init_root_yaw_inv_ = QuatInv(YawQuat(state.root_quat));
-    root_yaw_initialized_ = true;
-  }
-  // Orientation of the reference anchor in the current root frame, with both
-  // headings measured from where they were when the policy was selected.
-  const Quat current = QuatMul(init_root_yaw_inv_, state.root_quat);
-  const Quat reference = QuatMul(init_reference_yaw_inv_, ref_anchor_quat_);
-  const auto rotation = MatrixFromQuat(QuatMul(QuatInv(current), reference));
-
-  float* obs = model_.input(0).data();
-  std::copy(ref_joint_pos_.begin(), ref_joint_pos_.end(), obs);
-  std::copy(ref_joint_vel_.begin(), ref_joint_vel_.end(), obs + 22);
-  // First two columns of the rotation matrix, row by row.
-  for (std::size_t row = 0; row < 3; ++row) {
-    obs[44 + 2 * row] = rotation[3 * row];
-    obs[45 + 2 * row] = rotation[3 * row + 1];
-  }
-  std::copy(state.angular_velocity.begin(), state.angular_velocity.end(), obs + 50);
-  for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
-    obs[53 + i] = state.joint_pos[policy_to_robot_[i]] - default_joint_pos_[i];
-    obs[75 + i] = state.joint_vel[policy_to_robot_[i]];
-  }
-  // The head was fixed at zero in training and the ankle wiggle is not the
-  // policy's doing, so the policy sees neither.
-  for (const std::size_t i : head_indices_) {
-    obs[53 + i] = 0.0F;
-    obs[75 + i] = 0.0F;
-  }
-  for (std::size_t k = 0; k < ankle_pitch_indices_.size(); ++k) {
-    obs[53 + ankle_pitch_indices_[k]] -= ankle_offset_[k];
-    obs[75 + ankle_pitch_indices_[k]] -= ankle_offset_rate_[k];
-  }
-  std::copy(last_action_.begin(), last_action_.end(), obs + 97);
-  std::copy(state.projected_gravity.begin(), state.projected_gravity.end(), obs + 117);
-  // The ONNX input keeps its training name; it enables sitting. A stand
-  // request keeps the seat until the ankle wiggle has faded and settled.
+  // A stand request keeps the seat until the ankle wiggle has faded and settled.
   const bool settling = wiggle_envelope_ > 0.0F || wiggle_settle_left_ > 0.0F;
-  model_.input(1)[0] = sit || settling ? 1.0F : 0.0F;
+  const bool enabled = sit || settling;
+  // Each sit plays the clip from where the robot faces as it starts.
+  if (!aligned_ || (enabled && playhead_.phase == SitPlayhead::Phase::kStanding)) {
+    clip_heading_ = QuatMul(YawQuat(state.root_quat), QuatInv(YawQuat(clip_.front().root_quat)));
+    aligned_ = true;
+  }
 
-  trace_.observation = model_.input(0);
-  trace_.state_in = model_.int64_input(2);
-  trace_.enabled = model_.input(1)[0];
-  trace_.reference_q = ref_joint_pos_;
-  trace_.reference_dq = ref_joint_vel_;
-  trace_.reference_quat.assign(ref_anchor_quat_.begin(), ref_anchor_quat_.end());
-  trace_.reference_orientation_error_rad = std::acos(std::clamp(
-      (rotation[0] + rotation[4] + rotation[8] - 1.0F) * 0.5F, -1.0F, 1.0F));
+  std::array<float, kSitObservationSize> frame{};
+  for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
+    frame[i] = state.joint_pos[policy_to_robot_[i]] - default_joint_pos_[i];
+    frame[kPolicyJointCount + i] = state.joint_vel[policy_to_robot_[i]];
+  }
+  // The ankle wiggle is not the policy's doing, so the policy does not see it.
+  for (std::size_t k = 0; k < ankle_pitch_indices_.size(); ++k) {
+    frame[ankle_pitch_indices_[k]] -= ankle_offset_[k];
+    frame[kPolicyJointCount + ankle_pitch_indices_[k]] -= ankle_offset_rate_[k];
+  }
+  std::copy(state.angular_velocity.begin(), state.angular_velocity.end(), frame.begin() + 44);
+  std::copy(state.projected_gravity.begin(), state.projected_gravity.end(), frame.begin() + 47);
+  std::copy(last_action_.begin(), last_action_.end(), frame.begin() + 50);
+  // History frames are chronological; the first step fills every frame with it.
+  float* history = model_.input(0).data();
+  const std::size_t frame_bytes = sizeof(float) * kSitObservationSize;
+  if (history_initialized_) {
+    std::memmove(history, history + kSitObservationSize, frame_bytes * (kSitHistoryLength - 1));
+    std::memcpy(history + kSitObservationSize * (kSitHistoryLength - 1), frame.data(), frame_bytes);
+  } else {
+    for (std::size_t f = 0; f < kSitHistoryLength; ++f) {
+      std::memcpy(history + kSitObservationSize * f, frame.data(), frame_bytes);
+    }
+    history_initialized_ = true;
+  }
+  WriteGoal(state, playhead_, enabled);
 
-  const bool was_standing = IsStandingPose();
+  const SitClipFrame& current = clip_[static_cast<std::size_t>(playhead_.frame)];
+  const Quat reference = QuatMul(clip_heading_, current.root_quat);
+  const auto error = MatrixFromQuat(QuatMul(QuatInv(state.root_quat), reference));
+  trace_.observation.assign(frame.begin(), frame.end());
+  trace_.state_in = {static_cast<int64_t>(playhead_.phase), playhead_.frame, playhead_.direction};
+  trace_.enabled = enabled ? 1.0F : 0.0F;
+  trace_.reference_q = current.joint_pos;
+  trace_.reference_dq = current.joint_vel;
+  trace_.reference_quat.assign(reference.begin(), reference.end());
+  trace_.reference_orientation_error_rad =
+      std::acos(std::clamp((error[0] + error[4] + error[8] - 1.0F) * 0.5F, -1.0F, 1.0F));
+
   model_.Run();
   const std::vector<float>& action = model_.output(0);
-  trace_.raw_actions = action;
-  trace_.state_out = model_.int64_output(1);
-  trace_.next_reference_q = model_.output(2);
-  trace_.next_reference_dq = model_.output(3);
-  trace_.body_pos = model_.output(4);
-  trace_.body_quat = model_.output(5);
-  trace_.body_lin_vel = model_.output(6);
-  trace_.body_ang_vel = model_.output(7);
   std::copy(action.begin(), action.end(), last_action_.begin());
-  LatchOutputs();
-  // The stand-up reference turns the trunk about 120 degrees and the robot
-  // follows; the wrap to the standing sentinel snaps it back to frame zero.
-  // Re-latch both headings there so the terminal phase starts aligned instead
-  // of seeing the completed turn as heading error (a stepping turn in sim).
-  if (!was_standing && IsStandingPose()) {
-    init_reference_yaw_inv_ = QuatInv(YawQuat(ref_anchor_quat_));
-    root_yaw_initialized_ = false;
-  }
+  playhead_ = Advance(playhead_, enabled);
+  const SitClipFrame& next = clip_[static_cast<std::size_t>(playhead_.frame)];
+  ref_joint_pos_ = next.joint_pos;
+  trace_.raw_actions = action;
+  trace_.state_out = {static_cast<int64_t>(playhead_.phase), playhead_.frame, playhead_.direction};
+  trace_.next_reference_q = next.joint_pos;
+  trace_.next_reference_dq = next.joint_vel;
 
   command_.position = config_.robot.default_joint_pos;
-  for (std::size_t a = 0; a < kSitActionCount; ++a) {
-    const std::size_t i = action_to_policy_[a];
-    command_.position[policy_to_robot_[i]] = default_joint_pos_[i] + action_scale_[a] * action[a];
+  for (std::size_t i = 0; i < kPolicyJointCount; ++i) {
+    command_.position[policy_to_robot_[i]] = default_joint_pos_[i] + action_scale_[i] * action[i];
   }
+  const std::array<float, 2> policy_head = {command_.position[policy_to_robot_[head_indices_[0]]],
+                                            command_.position[policy_to_robot_[head_indices_[1]]]};
   const bool seated = Seated(sit);
   trace_.raw_targets = command_.position;
-  trace_.arm_limit = Seated(sit || settling) ? config_.sit_arm_hold_torque_limit
-                                           : config_.sit_arm_move_torque_limit;
-  SteerHead(state, seated, head_target);
+  trace_.arm_limit = Seated(enabled) ? config_.sit_arm_hold_torque_limit
+                                     : config_.sit_arm_move_torque_limit;
+  SteerHead(state, seated, head_target, policy_head);
   WiggleAnkles(seated);
-  LimitArmTorque(state, Seated(sit || settling));
+  LimitArmTorque(state, Seated(enabled));
   return command_;
 }
 
 bool SitPolicy::Seated(bool sit) const {
-  // The model may report the seated phase for a few steps after a stand
-  // request, so standing up never counts as seated.
-  return sit && model_.int64_input(2)[kSitPhaseIndex] == kSitSeatedPhase;
+  // Standing up never counts as seated, even while still in the loop frames.
+  return sit && playhead_.phase == SitPlayhead::Phase::kSeated;
 }
 
 void SitPolicy::SteerHead(const RobotState& state, bool seated,
-                          const std::array<float, 2>& head_target) {
+                          const std::array<float, 2>& head_target,
+                          const std::array<float, 2>& policy_head) {
   if (!head_initialized_) {
     for (std::size_t k = 0; k < head_position_.size(); ++k) {
       head_position_[k] = state.joint_pos[policy_to_robot_[head_indices_[k]]];
@@ -830,7 +942,7 @@ void SitPolicy::SteerHead(const RobotState& state, bool seated,
   }
   was_seated_ = seated;
 
-  std::array<float, 2> goal{};
+  std::array<float, 2> goal = policy_head;
   float rate = kSitHeadRate;
   if (seated) {
     if (head_target != operator_target_) {
@@ -847,8 +959,8 @@ void SitPolicy::SteerHead(const RobotState& state, bool seated,
       look_target_ = head_target;
       look_hold_ = 0.0F;
     }
+    goal[1] = std::clamp(goal[1], kHeadPitchMin, kHeadPitchMax);
   }
-  goal[1] = std::clamp(goal[1], kHeadPitchMin, kHeadPitchMax);
   const float max_step = rate * dt;
   for (std::size_t k = 0; k < head_position_.size(); ++k) {
     head_position_[k] += std::clamp(goal[k] - head_position_[k], -max_step, max_step);
@@ -975,8 +1087,7 @@ void SitPolicy::LimitArmTorque(const RobotState& state, bool seated) {
 }
 
 bool SitPolicy::IsStandingPose() const {
-  const auto& current = model_.int64_input(2);
-  return std::equal(current.begin(), current.end(), kSitStandingState.begin());
+  return playhead_.phase == SitPlayhead::Phase::kStanding;
 }
 
 float SitPolicy::StandingLegError(const RobotState& state) const {

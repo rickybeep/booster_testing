@@ -171,17 +171,33 @@ velocity independently to `1.5 m/s`, and angular velocity to `2.4 rad/s`.
 
 ## Sit ONNX contract
 
-`tasks/sit/models/sit.onnx` is a stateful motion-tracking policy. Its inputs are
-`obs` (`[1, 120]`), `squat_enabled` (`[1, 1]`), and the int64 trajectory state
-`squat_state_in` (`[1, 3]`); every call returns actions for the 20 non-head
-joints, `squat_state_out`, and the next reference frame. Deployment feeds the
-returned state and reference into the next control step without interpreting
-the state machine, holds both head joints at zero, and restores the standing
-state `[0, 0, 1]` plus the embedded frame-zero reference each time the sit
-policy is selected. The anchor-orientation observation needs the full root
-orientation, which the node builds from the IMU roll, pitch, and yaw; headings
-are measured relative to the moment sit was selected. Standing means the
-trajectory state has returned to `[0, 0, 1]`. The sit policy has no
+`tasks/sit/models/sit.onnx` is booster-lab's SuperMimic motion tracker
+(`Mjlab-SuperMimic-Flat-Beeple-K1`, fine-tuned on the Beeple K1 with an arm
+torque penalty), and `tasks/sit/models/sit.motion.json` beside it is the sit
+clip it plays (`kneel-sitdown-tracking:v2`). The ankle damping in the
+metadata is the crank-motor kd, since the firmware applies kd per motor.
+
+The model takes `actor_obs` (`[1, 720]`), 10 chronological frames of joint
+position offsets, joint velocities, angular velocity, projected gravity and
+previous actions (all 22 joints), and `goal` (`[1, 570]`), the next 10
+reference frames: the reference trunk orientation in the robot trunk frame
+(first two rotation-matrix columns), its heading-frame linear velocity,
+trunk-frame angular velocity, height, joint position offsets and joint
+velocities. It returns `actions` for all 22 joints. After a reset the history
+is filled with the first frame and the previous action holds the clip's first
+frame, as in training.
+
+Deployment plays the clip with booster-lab's toggle-tracking timing: a sit
+request plays it forward into the seated loop (`loop_start_frame` to
+`loop_end_frame`), which repeats while sit is held; releasing sit plays the
+stand-up, which ends holding the last frame. Releasing sit while sitting down
+plays back toward standing, and asking again while standing up plays back
+into the loop; played back, the goal's reference rates are reversed. Each sit
+aligns the clip's heading with the robot's IMU heading as it starts. Standing
+means the playhead is in its standing phase. While seated the head follows
+the operator or looks around, the ankles wiggle (hidden from the
+observation), and the seated arm torque cap applies; otherwise the head
+follows the policy's own target at the head rate. The sit policy has no
 orientation safety fallback and uses only the gains embedded in its ONNX
 metadata. Set `sit_checkpoint_path` to `None` to leave it unloaded; commanding
 sit then faults the session.
@@ -224,6 +240,7 @@ pixi run test
 publisher and drives it through `PolicyClient`.
 
 The tracked policy artifacts are `tasks/walk/models/gait.onnx`,
-`tasks/squat/models/squat.onnx`, and `tasks/sit/models/sit.onnx`. Their metadata is validated at startup and is
+`tasks/squat/models/squat.onnx`, and `tasks/sit/models/sit.onnx` (with its clip
+`tasks/sit/models/sit.motion.json`). Their metadata is validated at startup and is
 the source of truth for observation layout, joint order, default positions,
 gains, and action scaling.
